@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+/* ── Reset & base ── */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5}
+a{color:inherit;text-decoration:none}
+button{cursor:pointer;font-family:inherit;font-size:13px}
+input,select,textarea{font-family:inherit;font-size:13px}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#222;border-radius:2px}
+
+/* ── Login ── */
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0a}
+.login-card{background:#111;border:1px solid #1e1e1e;border-radius:14px;padding:44px;width:380px}
+.login-logo{font-size:11px;color:#333;text-transform:uppercase;letter-spacing:2.5px;margin-bottom:32px}
+.login-title{font-size:22px;font-weight:400;color:#e0e0e0;margin-bottom:6px}
+.login-sub{font-size:13px;color:#444;margin-bottom:32px;line-height:1.5}
+.btn-google{width:100%;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:9px;color:#ccc;padding:12px 16px;display:flex;align-items:center;justify-content:center;gap:10px;transition:background .15s,border-color .15s}
+.btn-google:hover{background:#1e1e1e;border-color:#333;color:#e0e0e0}
+.btn-google svg{flex-shrink:0}
+.login-divider{display:flex;align-items:center;gap:12px;margin:20px 0;color:#2a2a2a;font-size:11px}
+.login-divider::before,.login-divider::after{content:'';flex:1;height:1px;background:#1e1e1e}
+.login-emergency{width:100%;background:transparent;border:none;color:#333;font-size:12px;padding:8px;transition:color .15s}
+.login-emergency:hover{color:#555}
+.login-error{background:#1a0a0a;border:1px solid #3a1a1a;border-radius:8px;color:#e06060;font-size:12px;padding:10px 14px;margin-bottom:20px}
+.login-loading{color:#333;font-size:13px;text-align:center;padding:20px 0}
+
+/* ── App shell ── */
+.app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* ── Top nav ── */
+.nav{height:48px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;padding:0 20px;gap:0;flex-shrink:0;z-index:50}
+.nav-brand{font-size:13px;font-weight:500;color:#e0e0e0;letter-spacing:.5px;margin-right:28px;display:flex;align-items:center;gap:8px}
+.nav-brand-dot{width:6px;height:6px;border-radius:50%;background:#3b82f6}
+.nav-tabs{display:flex;align-items:center;gap:2px;flex:1}
+.nav-tab{padding:6px 12px;border-radius:6px;font-size:13px;color:#555;background:transparent;border:none;transition:color .15s,background .15s;white-space:nowrap}
+.nav-tab:hover{color:#aaa;background:#151515}
+.nav-tab.active{color:#e0e0e0;background:#1a1a1a}
+.nav-right{display:flex;align-items:center;gap:12px;margin-left:auto}
+.nav-user{font-size:12px;color:#444}
+.nav-logout{font-size:12px;color:#333;background:transparent;border:none;padding:4px 8px;border-radius:5px;transition:color .15s}
+.nav-logout:hover{color:#888}
+
+/* ── Main content ── */
+.main{flex:1;overflow-y:auto;padding:24px 28px}
+.page-header{margin-bottom:24px}
+.page-title{font-size:18px;font-weight:400;color:#e0e0e0;margin-bottom:4px}
+.page-sub{font-size:13px;color:#444}
+
+/* ── Week selector ── */
+.week-bar{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+.week-label{font-size:12px;color:#444;white-space:nowrap}
+.week-select{background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#aaa;padding:6px 10px;font-size:12px;outline:none}
+.week-select:focus{border-color:#2a2a2a}
+.wow-badge{font-size:11px;padding:2px 8px;border-radius:4px;font-weight:500}
+.wow-up{background:#1a2a1a;color:#4ade80}
+.wow-down{background:#2a1a1a;color:#f87171}
+.wow-neutral{background:#1a1a1a;color:#555}
+
+/* ── Stat cards ── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:16px}
+.stat-val{font-size:26px;font-weight:400;color:#e0e0e0;line-height:1;margin-bottom:4px}
+.stat-lbl{font-size:11px;color:#444;text-transform:uppercase;letter-spacing:.5px}
+.stat-delta{font-size:11px;margin-top:4px}
+.delta-up{color:#4ade80}
+.delta-down{color:#f87171}
+
+/* ── Cards ── */
+.card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:18px;margin-bottom:14px}
+.card-title{font-size:12px;color:#444;text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+
+/* ── Bar chart ── */
+.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.bar-label{font-size:12px;color:#666;width:140px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px;background:#3b82f6;transition:width .3s}
+.bar-count{font-size:11px;color:#444;width:32px;text-align:right;flex-shrink:0}
+
+/* ── Dept sub-tabs ── */
+.dept-tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #1a1a1a;padding-bottom:0}
+.dept-tab{padding:8px 14px;font-size:13px;color:#444;background:transparent;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s}
+.dept-tab:hover{color:#888}
+.dept-tab.active{color:#e0e0e0;border-bottom-color:#3b82f6}
+
+/* ── Insight content ── */
+.insight-box{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:10px;padding:20px;font-size:13px;line-height:1.7;color:#aaa;white-space:pre-wrap;word-break:break-word}
+.insight-box h2,.insight-box h3{color:#e0e0e0;font-weight:500;margin:16px 0 8px;font-size:14px}
+.insight-box strong{color:#ccc;font-weight:500}
+.insight-meta{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.insight-ts{font-size:11px;color:#333}
+.btn-refresh{background:#151515;border:1px solid #1e1e1e;border-radius:6px;color:#555;padding:5px 12px;font-size:12px;transition:color .15s,border-color .15s}
+.btn-refresh:hover{color:#aaa;border-color:#2a2a2a}
+.btn-refresh:disabled{opacity:.4;cursor:not-allowed}
+.insight-empty{color:#333;font-size:13px;padding:32px;text-align:center}
+.insight-loading{color:#333;font-size:13px;padding:32px;text-align:center;animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+/* ── Data tab ── */
+.sync-status{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:20px}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot-green{background:#4ade80}
+.dot-amber{background:#fbbf24;animation:pulse 1s ease-in-out infinite}
+.dot-red{background:#f87171}
+.dot-gray{background:#333}
+.sync-log-table{width:100%;border-collapse:collapse}
+.sync-log-table th{font-size:11px;color:#333;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;text-align:left;border-bottom:1px solid #1a1a1a}
+.sync-log-table td{font-size:12px;color:#555;padding:8px 10px;border-bottom:1px solid #111}
+.sync-log-table tr:last-child td{border-bottom:none}
+.status-pill{display:inline-block;font-size:10px;font-weight:500;padding:2px 8px;border-radius:4px}
+.pill-success{background:#0d2010;color:#4ade80}
+.pill-error{background:#200d0d;color:#f87171}
+.pill-running{background:#1a1a0d;color:#fbbf24}
+.btn-primary{background:#1a2a3a;border:1px solid #1e3a5a;border-radius:7px;color:#7dd3fc;padding:8px 16px;font-size:13px;transition:background .15s}
+.btn-primary:hover{background:#1e3045}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed}
+.btn-danger{background:#2a1010;border:1px solid #4a1515;border-radius:7px;color:#f87171;padding:8px 16px;font-size:13px;transition:background .15s}
+.btn-danger:hover{background:#331515}
+.date-input{background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#aaa;padding:7px 10px;font-size:12px;outline:none}
+.date-input:focus{border-color:#2a2a2a}
+.form-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.form-label{font-size:12px;color:#444;width:80px;flex-shrink:0}
+
+/* ── Settings / User management ── */
+.user-table{width:100%;border-collapse:collapse}
+.user-table th{font-size:11px;color:#333;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;text-align:left;border-bottom:1px solid #1a1a1a}
+.user-table td{font-size:13px;color:#888;padding:10px 10px;border-bottom:1px solid #111;vertical-align:middle}
+.user-table tr:last-child td{border-bottom:none}
+.role-pill{display:inline-block;font-size:10px;font-weight:500;padding:2px 8px;border-radius:4px}
+.pill-admin{background:#1a1a2a;color:#a78bfa}
+.pill-viewer{background:#1a1a1a;color:#555}
+.active-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.active-on{background:#4ade80}
+.active-off{background:#333}
+.btn-sm{background:#151515;border:1px solid #1e1e1e;border-radius:5px;color:#555;padding:4px 10px;font-size:11px;transition:color .15s}
+.btn-sm:hover{color:#aaa;border-color:#2a2a2a}
+.btn-sm-danger{background:#1a0a0a;border:1px solid #3a1010;border-radius:5px;color:#f87171;padding:4px 10px;font-size:11px;transition:background .15s}
+.btn-sm-danger:hover{background:#201010}
+.add-user-form{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:10px;padding:18px;margin-top:16px}
+.input-field{background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#aaa;padding:7px 10px;font-size:13px;outline:none;width:100%}
+.input-field:focus{border-color:#2a2a2a}
+.select-field{background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#aaa;padding:7px 10px;font-size:13px;outline:none}
+.select-field:focus{border-color:#2a2a2a}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group label{font-size:11px;color:#333;text-transform:uppercase;letter-spacing:.5px}
+.err-msg{color:#f87171;font-size:12px;margin-top:6px}
+.ok-msg{color:#4ade80;font-size:12px;margin-top:6px}
+
+/* ── Chat widget ── */
+.chat-btn{position:fixed;bottom:24px;right:24px;width:46px;height:46px;border-radius:50%;background:#1a2a3a;border:1px solid #1e3a5a;color:#7dd3fc;display:flex;align-items:center;justify-content:center;z-index:100;transition:background .15s,transform .15s;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.chat-btn:hover{background:#1e3045;transform:scale(1.05)}
+.chat-panel{position:fixed;bottom:80px;right:24px;width:400px;max-height:560px;background:#0f0f0f;border:1px solid #1e1e1e;border-radius:14px;display:flex;flex-direction:column;z-index:100;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.6)}
+.chat-header{padding:14px 16px;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;justify-content:space-between}
+.chat-header-title{font-size:13px;font-weight:500;color:#e0e0e0}
+.chat-header-sub{font-size:11px;color:#333;margin-top:1px}
+.chat-close{background:transparent;border:none;color:#333;font-size:18px;line-height:1;transition:color .15s}
+.chat-close:hover{color:#888}
+.chat-messages{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-height:200px}
+.chat-msg{max-width:88%;font-size:13px;line-height:1.5;padding:8px 12px;border-radius:10px}
+.chat-msg.user{align-self:flex-end;background:#1a2a3a;color:#7dd3fc;border-radius:10px 10px 2px 10px}
+.chat-msg.assistant{align-self:flex-start;background:#151515;color:#aaa;border:1px solid #1a1a1a;border-radius:10px 10px 10px 2px}
+.chat-msg.thinking{align-self:flex-start;color:#333;font-size:12px;font-style:italic}
+.chat-sql{font-size:10px;color:#333;font-family:monospace;margin-top:6px;padding:6px 8px;background:#0a0a0a;border-radius:5px;border:1px solid #1a1a1a;word-break:break-all}
+.chat-input-row{padding:12px 14px;border-top:1px solid #1a1a1a;display:flex;gap:8px}
+.chat-input{flex:1;background:#111;border:1px solid #1a1a1a;border-radius:8px;color:#aaa;padding:8px 10px;font-size:13px;resize:none;outline:none;min-height:36px;max-height:90px}
+.chat-input:focus{border-color:#2a2a2a}
+.chat-send{background:#1a2a3a;border:1px solid #1e3a5a;border-radius:7px;color:#7dd3fc;padding:8px 12px;font-size:12px;transition:background .15s}
+.chat-send:hover{background:#1e3045}
+.chat-send:disabled{opacity:.4;cursor:not-allowed}
+.chat-clear{background:transparent;border:none;color:#2a2a2a;font-size:11px;transition:color .15s}
+.chat-clear:hover{color:#555}
+
+/* ── Misc ── */
+.empty{color:#2a2a2a;font-size:13px;padding:32px;text-align:center}
+.error-box{background:#1a0a0a;border:1px solid #3a1a1a;border-radius:8px;color:#e06060;font-size:13px;padding:12px 16px;margin-bottom:14px}
+.section-sep{border:none;border-top:1px solid #1a1a1a;margin:20px 0}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState, useEffect, useRef, useCallback} = React;
+const BASE = (window.__ENV__ && window.__ENV__.BASE_URL) || window.location.origin;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function api(path, opts={}) {
+  const token = sessionStorage.getItem("scout_session") || "";
+  const headers = {"Content-Type":"application/json", ...(token ? {"Authorization":"Bearer "+token} : {}), ...(opts.headers||{})};
+  return fetch(BASE+path, {...opts, headers}).then(r=>r.json());
+}
+
+function hashRoute() { return window.location.hash.replace(/^#/,"") || "/dashboard"; }
+
+function fmt(n) { return (n||0).toLocaleString(); }
+function fmtDate(s) { if(!s) return "—"; return new Date(s).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+function fmtDT(s) { if(!s) return "—"; return new Date(s).toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}); }
+
+function delta(curr, prev) {
+  if(!prev || prev===0) return null;
+  const pct = Math.round(((curr-prev)/prev)*100);
+  return pct;
+}
+
+function WoW({curr, prev, label}) {
+  const d = delta(curr, prev);
+  if(d===null) return null;
+  const cls = d > 0 ? "delta-up" : d < 0 ? "delta-down" : "";
+  const sign = d > 0 ? "+" : "";
+  return <span className={`stat-delta ${cls}`}>{sign}{d}% vs prev week</span>;
+}
+
+function BarChart({data, labelKey, valueKey, max}) {
+  const m = max || Math.max(...data.map(d=>d[valueKey]||0), 1);
+  return <div>{data.map((d,i)=>(
+    <div className="bar-row" key={i}>
+      <div className="bar-label" title={d[labelKey]}>{d[labelKey]||"—"}</div>
+      <div className="bar-track"><div className="bar-fill" style={{width:Math.round(((d[valueKey]||0)/m)*100)+"%"}}/></div>
+      <div className="bar-count">{fmt(d[valueKey])}</div>
+    </div>
+  ))}</div>;
+}
+
+function weekLabel(ws) {
+  if(!ws) return "";
+  const s = new Date(ws+"T00:00:00");
+  const e = new Date(s); e.setDate(e.getDate()+6);
+  return s.toLocaleDateString("en-US",{month:"short",day:"numeric"}) + " – " + e.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+function Login({onLogin}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState("");
+  useEffect(()=>{
+    const params = new URLSearchParams(window.location.search);
+    const session = params.get("session");
+    const authError = params.get("auth_error");
+    if(session) {
+      window.history.replaceState({}, "", window.location.pathname+window.location.hash);
+      setLoading(true);
+      api("/auth/verify",{headers:{"Authorization":"Bearer "+session}}).then(r=>{
+        if(r.ok) { sessionStorage.setItem("scout_session",session); onLogin({...r, token:session}); }
+        else { setError("Login failed. Try again."); setLoading(false); }
+      }).catch(()=>{ setError("Network error."); setLoading(false); });
+    }
+    if(authError) { setError("Sign-in was cancelled or failed."); window.history.replaceState({},"",window.location.pathname+window.location.hash); }
+  },[]);
+  return (
+    <div className="login-wrap">
+      <div className="login-card">
+        <div className="login-logo">Freedom Grooming &nbsp;·&nbsp; Scout</div>
+        <div className="login-title">Scout</div>
+        <div className="login-sub">Weekly ticket intelligence for the whole team.</div>
+        {error && <div className="login-error">{error}</div>}
+        {loading ? <div className="login-loading">Signing in…</div> : <>
+          <button className="btn-google" onClick={()=>{ setLoading(true); window.location.href=BASE+"/auth/google"; }}>
+            <svg width="18" height="18" viewBox="0 0 18 18"><path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/><path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/><path d="M3.964 10.706A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.706V4.962H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.038l3.007-2.332z" fill="#FBBC05"/><path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.962L3.964 7.294C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/></svg>
+            Sign in with Google
+          </button>
+          <div className="login-divider">or</div>
+          <button className="login-emergency" onClick={()=>window.location.href=BASE+"/emergency"}>Emergency access</button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+function Dashboard({weeks, selectedWeek, onWeekChange}) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(()=>{
+    setLoading(true); setError("");
+    api("/api/dashboard"+(selectedWeek?"?week="+selectedWeek:"")).then(r=>{
+      if(r.error) setError(r.error);
+      else setData(r);
+      setLoading(false);
+    }).catch(()=>{ setError("Failed to load"); setLoading(false); });
+  },[selectedWeek]);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div className="page-title">Dashboard</div>
+        <div className="page-sub">All-team ticket overview</div>
+      </div>
+      <WeekBar weeks={weeks} selected={selectedWeek} onChange={onWeekChange}/>
+      {error && <div className="error-box">{error}</div>}
+      {loading && <div className="empty">Loading…</div>}
+      {!loading && data && <>
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.stats?.total_tickets)}</div>
+            <div className="stat-lbl">Total tickets</div>
+            <WoW curr={data.stats?.total_tickets} prev={data.prev_week?.total}/>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.stats?.cancellations)}</div>
+            <div className="stat-lbl">Cancellations</div>
+            <WoW curr={data.stats?.cancellations} prev={data.prev_week?.cancellations}/>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.stats?.closed)}</div>
+            <div className="stat-lbl">Closed</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.stats?.open)}</div>
+            <div className="stat-lbl">Open</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.stats?.unique_customers)}</div>
+            <div className="stat-lbl">Unique customers</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{data.stats?.avg_messages||"—"}</div>
+            <div className="stat-lbl">Avg messages</div>
+          </div>
+        </div>
+        <div className="two-col">
+          <div className="card">
+            <div className="card-title">By contact reason</div>
+            <BarChart data={data.by_reason||[]} labelKey="contact_reason_l1" valueKey="cnt"/>
+          </div>
+          <div className="card">
+            <div className="card-title">By channel</div>
+            <BarChart data={data.by_channel||[]} labelKey="initial_channel" valueKey="cnt"/>
+          </div>
+        </div>
+        <div className="card">
+          <div className="card-title">Top agents by volume</div>
+          <BarChart data={data.by_agent||[]} labelKey="agent" valueKey="cnt"/>
+        </div>
+      </>}
+    </div>
+  );
+}
+
+// ── WeekBar ───────────────────────────────────────────────────────────────────
+function WeekBar({weeks, selected, onChange}) {
+  return (
+    <div className="week-bar">
+      <span className="week-label">Week</span>
+      <select className="week-select" value={selected||""} onChange={e=>onChange(e.target.value)}>
+        {(weeks||[]).map(w=>(
+          <option key={w.week_start} value={w.week_start}>
+            {weekLabel(w.week_start)} ({fmt(w.ticket_count)} tickets)
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// ── Departments ───────────────────────────────────────────────────────────────
+const DEPTS = [
+  {id:"cx",    label:"CX"},
+  {id:"marketing", label:"Marketing"},
+  {id:"sales", label:"Sales"},
+  {id:"ops",   label:"Ops"},
+  {id:"product",label:"Product"},
+];
+
+function Departments({route, weeks, selectedWeek, onWeekChange}) {
+  const deptFromRoute = route.split("/").pop();
+  const [activeDept, setActiveDept] = useState(DEPTS.find(d=>d.id===deptFromRoute) ? deptFromRoute : "cx");
+  const [insights, setInsights]     = useState({});
+  const [loading, setLoading]       = useState({});
+  const [refreshing, setRefreshing] = useState({});
+  const [pollTimer, setPollTimer]   = useState(null);
+
+  function loadInsight(dept, week) {
+    setLoading(p=>({...p,[dept]:true}));
+    api(`/api/insights/${dept}`+(week?"?week="+week:"")).then(r=>{
+      setInsights(p=>({...p,[dept]:r}));
+      setLoading(p=>({...p,[dept]:false}));
+    }).catch(()=>setLoading(p=>({...p,[dept]:false})));
+  }
+
+  useEffect(()=>{ loadInsight(activeDept, selectedWeek); },[activeDept, selectedWeek]);
+
+  function handleRefresh(dept) {
+    setRefreshing(p=>({...p,[dept]:true}));
+    api(`/api/insights/${dept}/refresh`,{
+      method:"POST",
+      body:JSON.stringify({week:selectedWeek})
+    }).then(()=>{
+      const timer = setInterval(()=>{
+        api(`/api/insights/${dept}`+(selectedWeek?"?week="+selectedWeek:"")).then(r=>{
+          if(r.content) {
+            setInsights(p=>({...p,[dept]:r}));
+            setRefreshing(p=>({...p,[dept]:false}));
+            clearInterval(timer);
+          }
+        });
+      }, 3000);
+      setPollTimer(timer);
+    }).catch(()=>setRefreshing(p=>({...p,[dept]:false})));
+  }
+
+  useEffect(()=>()=>{ if(pollTimer) clearInterval(pollTimer); },[pollTimer]);
+
+  function handleDeptClick(id) {
+    setActiveDept(id);
+    window.location.hash = "/departments/"+id;
+  }
+
+  const insight = insights[activeDept];
+  const isLoading = loading[activeDept];
+  const isRefreshing = refreshing[activeDept];
+
+  return (
+    <div>
+      <div className="page-header">
+        <div className="page-title">Departments</div>
+        <div className="page-sub">Claude-generated insights by team</div>
+      </div>
+      <WeekBar weeks={weeks} selected={selectedWeek} onChange={onWeekChange}/>
+      <div className="dept-tabs">
+        {DEPTS.map(d=>(
+          <button key={d.id} className={"dept-tab"+(activeDept===d.id?" active":"")} onClick={()=>handleDeptClick(d.id)}>
+            {d.label}
+          </button>
+        ))}
+      </div>
+      <div className="insight-meta">
+        <span className="insight-ts">
+          {insight?.generated_at ? "Generated "+fmtDT(insight.generated_at) : insight?.cached===false ? "No insights yet for this week" : ""}
+        </span>
+        <button className="btn-refresh" disabled={isRefreshing} onClick={()=>handleRefresh(activeDept)}>
+          {isRefreshing ? "Generating…" : "↺ Refresh insights"}
+        </button>
+      </div>
+      {(isLoading || isRefreshing) && <div className="insight-loading">{isRefreshing ? "Generating insights with Claude…" : "Loading…"}</div>}
+      {!isLoading && !isRefreshing && insight?.content && (
+        <div className="insight-box">{formatInsight(insight.content)}</div>
+      )}
+      {!isLoading && !isRefreshing && !insight?.content && (
+        <div className="insight-empty">
+          No insights for this week yet.<br/>
+          <span style={{color:"#333",fontSize:12}}>Click "Refresh insights" to generate now, or wait for Tuesday's scheduled run.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatInsight(text) {
+  if(!text) return null;
+  const lines = text.split("\n");
+  return lines.map((line,i)=>{
+    if(line.startsWith("## ") || line.startsWith("# ")) {
+      return <div key={i} style={{color:"#e0e0e0",fontWeight:500,fontSize:14,margin:"16px 0 8px"}}>{line.replace(/^#+\s*/,"")}</div>;
+    }
+    if(line.startsWith("**") && line.endsWith("**")) {
+      return <div key={i} style={{color:"#ccc",fontWeight:500,marginBottom:4}}>{line.replace(/\*\*/g,"")}</div>;
+    }
+    if(line.startsWith("- ") || line.startsWith("• ")) {
+      return <div key={i} style={{paddingLeft:16,marginBottom:3}}>• {line.slice(2)}</div>;
+    }
+    if(line.trim()==="") return <div key={i} style={{height:8}}/>;
+    return <div key={i} style={{marginBottom:4}}>{line}</div>;
+  });
+}
+
+// ── Data tab ──────────────────────────────────────────────────────────────────
+function DataTab() {
+  const [log, setLog]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [since, setSince]   = useState("");
+  const [msg, setMsg]       = useState("");
+
+  function loadLog() {
+    api("/api/sync/log").then(r=>{ setLog(r); setLoading(false); }).catch(()=>setLoading(false));
+  }
+  useEffect(()=>{ loadLog(); const t=setInterval(loadLog,15000); return()=>clearInterval(t); },[]);
+
+  function handleSync() {
+    setSyncing(true); setMsg("");
+    const body = since ? {since: new Date(since+"T00:00:00Z").toISOString()} : {};
+    api("/api/sync",{method:"POST",body:JSON.stringify(body)}).then(r=>{
+      setMsg(r.ok ? "Sync started — this may take a few minutes." : (r.error||"Failed"));
+      setSyncing(false); setTimeout(loadLog,2000);
+    }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
+  }
+
+  function handleBackfill() {
+    if(!window.confirm("Re-run the full backfill from the 1st of last month? This may take several minutes.")) return;
+    setSyncing(true); setMsg("");
+    api("/api/sync/backfill",{method:"POST"}).then(r=>{
+      setMsg(r.ok ? "Backfill started." : (r.error||"Failed"));
+      setSyncing(false); setTimeout(loadLog,2000);
+    }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
+  }
+
+  const running = log?.logs?.some(l=>l.status==="running");
+  const lastSync = log?.logs?.[0];
+
+  return (
+    <div>
+      <div className="page-header">
+        <div className="page-title">Data</div>
+        <div className="page-sub">Sync controls and history</div>
+      </div>
+      <div className="card">
+        <div className="card-title">Status</div>
+        <div className="sync-status">
+          <div className={"dot "+( running?"dot-amber": lastSync?.status==="success"?"dot-green": lastSync?.status==="error"?"dot-red":"dot-gray")}/>
+          <span>{running ? "Sync in progress…" : lastSync ? "Last sync: "+fmtDT(lastSync.started_at)+" · "+lastSync.tickets_synced+" tickets" : "No sync history"}</span>
+        </div>
+        <div style={{color:"#333",fontSize:12}}>Total tickets in database: <span style={{color:"#555"}}>{fmt(log?.total_tickets)}</span></div>
+      </div>
+      <div className="card">
+        <div className="card-title">Manual sync</div>
+        <div className="form-row">
+          <span className="form-label">Since date</span>
+          <input type="date" className="date-input" value={since} onChange={e=>setSince(e.target.value)} placeholder="Leave blank for last 25 hours"/>
+          <button className="btn-primary" disabled={syncing} onClick={handleSync}>
+            {syncing?"Starting…":"Run sync"}
+          </button>
+        </div>
+        {msg && <div style={{fontSize:12,color:msg.includes("error")||msg.includes("Failed")?"#f87171":"#4ade80"}}>{msg}</div>}
+        <hr className="section-sep"/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:13,color:"#666",marginBottom:4}}>Full backfill</div>
+            <div style={{fontSize:12,color:"#333"}}>Re-pulls all tickets from the 1st of the previous month</div>
+          </div>
+          <button className="btn-danger" disabled={syncing} onClick={handleBackfill}>Re-run backfill</button>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-title">Sync history</div>
+        {loading && <div className="empty">Loading…</div>}
+        {!loading && (!log?.logs?.length) && <div className="empty">No sync history yet</div>}
+        {!loading && log?.logs?.length > 0 && (
+          <table className="sync-log-table">
+            <thead><tr>
+              <th>Type</th><th>Started</th><th>Duration</th><th>Tickets</th><th>Status</th>
+            </tr></thead>
+            <tbody>{log.logs.map(l=>{
+              const dur = l.finished_at ? Math.round((new Date(l.finished_at)-new Date(l.started_at))/1000)+"s" : "—";
+              return (
+                <tr key={l.id}>
+                  <td style={{color:"#666"}}>{l.sync_type}</td>
+                  <td>{fmtDT(l.started_at)}</td>
+                  <td>{dur}</td>
+                  <td>{fmt(l.tickets_synced)}</td>
+                  <td><span className={"status-pill pill-"+l.status}>{l.status}</span></td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+function Settings({currentUser}) {
+  const [users, setUsers]     = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm]       = useState({name:"",email:"",role:"viewer",department:""});
+  const [formErr, setFormErr] = useState("");
+  const [formOk, setFormOk]   = useState("");
+  const [editId, setEditId]   = useState(null);
+
+  function loadUsers() {
+    api("/api/users").then(r=>{ setUsers(r.users||[]); setLoading(false); }).catch(()=>setLoading(false));
+  }
+  useEffect(loadUsers,[]);
+
+  function handleAdd() {
+    setFormErr(""); setFormOk("");
+    if(!form.name||!form.email){setFormErr("Name and email are required."); return;}
+    api("/api/users",{method:"POST",body:JSON.stringify(form)}).then(r=>{
+      if(r.ok){setFormOk("User added."); setForm({name:"",email:"",role:"viewer",department:""}); loadUsers();}
+      else setFormErr(r.error||"Failed");
+    }).catch(()=>setFormErr("Network error"));
+  }
+
+  function handleUpdate(id, changes) {
+    api("/api/users/update",{method:"POST",body:JSON.stringify({id,...changes})}).then(r=>{
+      if(r.ok) loadUsers();
+      else alert(r.error||"Failed");
+    });
+  }
+
+  function handleDelete(id, name) {
+    if(!window.confirm(`Delete user "${name}"?`)) return;
+    api("/api/users/delete",{method:"POST",body:JSON.stringify({id})}).then(r=>{
+      if(r.ok) loadUsers();
+      else alert(r.error||"Failed");
+    });
+  }
+
+  return (
+    <div>
+      <div className="page-header">
+        <div className="page-title">Settings</div>
+        <div className="page-sub">User management</div>
+      </div>
+      <div className="card">
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+          <div className="card-title" style={{margin:0}}>Users</div>
+          <button className="btn-primary" onClick={()=>setShowAdd(p=>!p)} style={{fontSize:12,padding:"5px 12px"}}>
+            {showAdd?"Cancel":"+ Add user"}
+          </button>
+        </div>
+        {showAdd && (
+          <div className="add-user-form">
+            <div className="form-grid">
+              <div className="form-group">
+                <label>Name</label>
+                <input className="input-field" value={form.name} onChange={e=>setForm(p=>({...p,name:e.target.value}))} placeholder="Full name"/>
+              </div>
+              <div className="form-group">
+                <label>Email</label>
+                <input className="input-field" value={form.email} onChange={e=>setForm(p=>({...p,email:e.target.value}))} placeholder="email@myfreebird.com"/>
+              </div>
+              <div className="form-group">
+                <label>Role</label>
+                <select className="select-field" value={form.role} onChange={e=>setForm(p=>({...p,role:e.target.value}))}>
+                  <option value="viewer">Viewer</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Department</label>
+                <select className="select-field" value={form.department} onChange={e=>setForm(p=>({...p,department:e.target.value}))}>
+                  <option value="">All</option>
+                  <option value="cx">CX</option>
+                  <option value="marketing">Marketing</option>
+                  <option value="sales">Sales</option>
+                  <option value="ops">Ops</option>
+                  <option value="product">Product</option>
+                </select>
+              </div>
+            </div>
+            {formErr && <div className="err-msg">{formErr}</div>}
+            {formOk  && <div className="ok-msg">{formOk}</div>}
+            <button className="btn-primary" onClick={handleAdd}>Add user</button>
+          </div>
+        )}
+        {loading && <div className="empty">Loading…</div>}
+        {!loading && (
+          <table className="user-table">
+            <thead><tr>
+              <th>Name</th><th>Email</th><th>Role</th><th>Department</th><th>Active</th><th></th>
+            </tr></thead>
+            <tbody>{users.map(u=>(
+              <tr key={u.id}>
+                <td style={{color:"#ccc"}}>{u.name}</td>
+                <td style={{color:"#555",fontFamily:"monospace",fontSize:12}}>{u.email}</td>
+                <td>
+                  <span className={"role-pill "+(u.role==="admin"?"pill-admin":"pill-viewer")}>{u.role}</span>
+                </td>
+                <td style={{color:"#444"}}>{u.department||"All"}</td>
+                <td><span className={"active-dot "+(u.active?"active-on":"active-off")}/></td>
+                <td>
+                  <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+                    {u.role!=="admin" && <button className="btn-sm" onClick={()=>handleUpdate(u.id,{role:"admin"})}>Make admin</button>}
+                    {u.role==="admin" && u.email!==currentUser?.email && <button className="btn-sm" onClick={()=>handleUpdate(u.id,{role:"viewer"})}>Remove admin</button>}
+                    {u.active && u.email!==currentUser?.email && <button className="btn-sm" onClick={()=>handleUpdate(u.id,{active:false})}>Deactivate</button>}
+                    {!u.active && <button className="btn-sm" onClick={()=>handleUpdate(u.id,{active:true})}>Activate</button>}
+                    {u.email!==currentUser?.email && <button className="btn-sm-danger" onClick={()=>handleDelete(u.id,u.name)}>Delete</button>}
+                  </div>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Chat widget ───────────────────────────────────────────────────────────────
+function ChatWidget() {
+  const [open, setOpen]       = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput]     = useState("");
+  const [thinking, setThinking] = useState(false);
+  const msgEnd = useRef(null);
+
+  useEffect(()=>{ if(open) msgEnd.current?.scrollIntoView({behavior:"smooth"}); },[messages, open]);
+
+  function handleSend() {
+    if(!input.trim()||thinking) return;
+    const userMsg = {role:"user", content:input.trim()};
+    const newMsgs = [...messages, userMsg];
+    setMessages(newMsgs); setInput(""); setThinking(true);
+    api("/api/chat",{method:"POST",body:JSON.stringify({messages:newMsgs})}).then(r=>{
+      setThinking(false);
+      if(r.error) { setMessages(p=>[...p,{role:"assistant",content:"Error: "+r.error,sql:null}]); return; }
+      setMessages(p=>[...p,{role:"assistant",content:r.response,sql:r.sql,row_count:r.row_count}]);
+    }).catch(()=>{ setThinking(false); setMessages(p=>[...p,{role:"assistant",content:"Network error.",sql:null}]); });
+  }
+
+  function handleKey(e) { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();handleSend();} }
+
+  return (
+    <>
+      <button className="chat-btn" onClick={()=>setOpen(p=>!p)} title="Ask Scout">
+        <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="chat-panel">
+          <div className="chat-header">
+            <div>
+              <div className="chat-header-title">Ask Scout</div>
+              <div className="chat-header-sub">Query your ticket data in plain English</div>
+            </div>
+            <button className="chat-close" onClick={()=>setOpen(false)}>×</button>
+          </div>
+          <div className="chat-messages">
+            {messages.length===0 && (
+              <div className="chat-msg thinking">Try: "What were the top 5 cancel reasons last month?" or "How many tickets did Jamie handle this week?"</div>
+            )}
+            {messages.map((m,i)=>(
+              <div key={i} className={"chat-msg "+m.role}>
+                {m.content}
+                {m.sql && <div className="chat-sql">SQL: {m.sql}</div>}
+                {m.row_count>0 && <div style={{fontSize:10,color:"#333",marginTop:4}}>{m.row_count} rows</div>}
+              </div>
+            ))}
+            {thinking && <div className="chat-msg thinking">Thinking…</div>}
+            <div ref={msgEnd}/>
+          </div>
+          <div className="chat-input-row">
+            <textarea className="chat-input" value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={handleKey} placeholder="Ask anything about your tickets…" rows={1}/>
+            <button className="chat-send" disabled={thinking||!input.trim()} onClick={handleSend}>Send</button>
+          </div>
+          {messages.length>0 && (
+            <div style={{padding:"0 14px 10px",textAlign:"right"}}>
+              <button className="chat-clear" onClick={()=>setMessages([])}>Clear conversation</button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser]         = useState(null);
+  const [route, setRoute]       = useState(hashRoute());
+  const [weeks, setWeeks]       = useState([]);
+  const [selectedWeek, setSelectedWeek] = useState("");
+
+  useEffect(()=>{
+    const onHash = ()=>setRoute(hashRoute());
+    window.addEventListener("hashchange", onHash);
+    return ()=>window.removeEventListener("hashchange", onHash);
+  },[]);
+
+  useEffect(()=>{
+    const token = sessionStorage.getItem("scout_session");
+    if(!token) return;
+    api("/auth/verify").then(r=>{
+      if(r.ok) setUser({...r, token});
+      else { sessionStorage.removeItem("scout_session"); }
+    }).catch(()=>{});
+  },[]);
+
+  useEffect(()=>{
+    if(!user) return;
+    api("/api/weeks").then(r=>{
+      const w = r.weeks||[];
+      setWeeks(w);
+      if(w.length>0 && !selectedWeek) setSelectedWeek(w[0].week_start);
+    });
+  },[user]);
+
+  function handleLogin(u) { setUser(u); window.location.hash="/dashboard"; }
+  function handleLogout() {
+    const token = sessionStorage.getItem("scout_session");
+    if(token) api("/auth/logout",{method:"POST",body:JSON.stringify({token})});
+    sessionStorage.removeItem("scout_session");
+    setUser(null);
+  }
+
+  function navigate(hash) { window.location.hash=hash; }
+
+  if(!user) return <Login onLogin={handleLogin}/>;
+
+  const isAdmin = user.role==="admin";
+  const mainRoute = route.split("/")[1]||"dashboard";
+
+  return (
+    <div className="app">
+      <nav className="nav">
+        <div className="nav-brand">
+          <div className="nav-brand-dot"/>Scout
+        </div>
+        <div className="nav-tabs">
+          <button className={"nav-tab"+(mainRoute==="dashboard"?" active":"")} onClick={()=>navigate("/dashboard")}>Dashboard</button>
+          <button className={"nav-tab"+(mainRoute==="departments"?" active":"")} onClick={()=>navigate("/departments/cx")}>Departments</button>
+          <button className={"nav-tab"+(mainRoute==="data"?" active":"")} onClick={()=>navigate("/data")}>Data</button>
+          {isAdmin && <button className={"nav-tab"+(mainRoute==="settings"?" active":"")} onClick={()=>navigate("/settings")}>Settings</button>}
+        </div>
+        <div className="nav-right">
+          <span className="nav-user">{user.name}</span>
+          <button className="nav-logout" onClick={handleLogout}>Sign out</button>
+        </div>
+      </nav>
+      <main className="main">
+        {mainRoute==="dashboard"   && <Dashboard weeks={weeks} selectedWeek={selectedWeek} onWeekChange={setSelectedWeek}/>}
+        {mainRoute==="departments" && <Departments route={route} weeks={weeks} selectedWeek={selectedWeek} onWeekChange={setSelectedWeek}/>}
+        {mainRoute==="data"        && <DataTab/>}
+        {mainRoute==="settings" && isAdmin && <Settings currentUser={user}/>}
+        {mainRoute==="settings" && !isAdmin && <div className="empty">Access denied</div>}
+      </main>
+      <ChatWidget/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
