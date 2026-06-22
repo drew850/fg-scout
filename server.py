@@ -482,40 +482,101 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
 
     conn = get_db()
     if not conn:
+        print("[Sync] ERROR: no DB connection")
         return 0
 
     total = 0
+    page_num = 0
     cursor = None
     since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00") if isinstance(since_dt, datetime) else since_dt
+    print(f"[Sync] START type={sync_type} since={since_str} log_id={log_id}")
+
+    def update_log_progress(status="running", error=None):
+        """Persist current progress to the sync log immediately."""
+        if not log_id:
+            return
+        try:
+            lc = get_db()
+            if not lc:
+                return
+            lcur = lc.cursor()
+            if error:
+                lcur.execute("""
+                    UPDATE scout_sync_log
+                    SET finished_at = now(), tickets_synced = %s, status = %s, error = %s
+                    WHERE id = %s
+                """, (total, status, str(error)[:2000], log_id))
+            else:
+                lcur.execute("""
+                    UPDATE scout_sync_log
+                    SET tickets_synced = %s, status = %s
+                    WHERE id = %s
+                """, (total, status, log_id))
+            lc.commit()
+            lc.close()
+        except Exception as le:
+            print(f"[Sync] WARN: could not update log: {le}")
 
     try:
-        import psycopg2.extras
         cur = conn.cursor()
         stop = False
         while not stop:
-            params = {
-                "limit": 100,
-                "order_by": "updated_datetime:desc",
-            }
+            page_num += 1
+            params = {"limit": 100, "order_by": "updated_datetime:desc"}
             if cursor:
                 params["cursor"] = cursor
-            data = gorgias_request("/tickets", params)
+
+            # Fetch with retry on transient errors (429, 5xx, network)
+            data = None
+            for attempt in range(1, 4):
+                try:
+                    data = gorgias_request("/tickets", params)
+                    break
+                except urllib.error.HTTPError as he:
+                    body = ""
+                    try: body = he.read().decode()[:300]
+                    except: pass
+                    print(f"[Sync] page={page_num} HTTP {he.code} attempt {attempt}/3: {body}")
+                    if he.code == 429:
+                        wait = 5 * attempt
+                        print(f"[Sync] rate limited, waiting {wait}s")
+                        time.sleep(wait)
+                    elif he.code >= 500:
+                        time.sleep(3 * attempt)
+                    else:
+                        raise
+                except Exception as ne:
+                    print(f"[Sync] page={page_num} network error attempt {attempt}/3: {ne}")
+                    time.sleep(3 * attempt)
+            if data is None:
+                raise Exception(f"Failed to fetch page {page_num} after 3 attempts")
+
             tickets = data.get("data", [])
+            print(f"[Sync] page={page_num} fetched={len(tickets)} total_so_far={total}")
             if not tickets:
+                print(f"[Sync] page={page_num} empty, stopping")
                 break
 
+            page_upserted = 0
             for t in tickets:
                 updated = t.get("updated_datetime", "") or ""
                 if updated < since_str:
-                    # Newest-first ordering means everything after this is older too.
+                    print(f"[Sync] reached cutoff at ticket {t.get('id')} ({updated} < {since_str}), stopping")
                     stop = True
                     break
-                upsert_ticket(cur, t)
-                total += 1
+                try:
+                    upsert_ticket(cur, t)
+                    total += 1
+                    page_upserted += 1
+                except Exception as ue:
+                    print(f"[Sync] WARN: upsert failed for ticket {t.get('id')}: {ue}")
+                    # roll back just this row's failed statement, keep going
+                    conn.rollback()
+                    cur = conn.cursor()
 
             conn.commit()
-            if total > 0:
-                print(f"[Sync] {total} tickets synced...")
+            update_log_progress("running")
+            print(f"[Sync] page={page_num} upserted={page_upserted} committed, total={total}")
 
             if stop:
                 break
@@ -523,38 +584,35 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             meta = data.get("meta", {})
             next_cursor = meta.get("next_cursor")
             if not next_cursor:
+                print(f"[Sync] no next_cursor after page {page_num}, reached end")
+                break
+
+            # Guard against Gorgias deep-pagination limits
+            if page_num >= 500:
+                print(f"[Sync] WARN: hit page limit (500), stopping defensively")
                 break
 
             cursor = next_cursor
-            time.sleep(0.1)  # gentle rate limiting
+            time.sleep(0.15)  # gentle rate limiting
 
         conn.commit()
-
-        if log_id:
-            cur.execute("""
-                UPDATE scout_sync_log
-                SET finished_at = now(), tickets_synced = %s, status = 'success'
-                WHERE id = %s
-            """, (total, log_id))
-            conn.commit()
-
-        print(f"[Sync] Done — {total} tickets synced")
+        update_log_progress("success")
+        print(f"[Sync] DONE type={sync_type} total={total} pages={page_num}")
     except Exception as e:
-        conn.rollback()
-        print(f"[Sync] Error: {e}")
-        if log_id:
-            try:
-                cur2 = conn.cursor()
-                cur2.execute("""
-                    UPDATE scout_sync_log
-                    SET finished_at = now(), status = 'error', error = %s
-                    WHERE id = %s
-                """, (str(e), log_id))
-                conn.commit()
-            except:
-                pass
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[Sync] FATAL error after {total} tickets, page {page_num}: {e}")
+        print(tb)
+        try:
+            conn.rollback()
+        except:
+            pass
+        update_log_progress("error", error=f"{e} (after {total} tickets, page {page_num})")
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except:
+            pass
     return total
 
 def run_backfill(force=False):

@@ -555,13 +555,24 @@ function DataTab() {
             <tbody>{log.logs.map(l=>{
               const dur = l.finished_at ? Math.round((new Date(l.finished_at)-new Date(l.started_at))/1000)+"s" : "—";
               return (
-                <tr key={l.id}>
+                <React.Fragment key={l.id}>
+                <tr>
                   <td style={{color:"#666"}}>{l.sync_type}</td>
                   <td>{fmtDT(l.started_at)}</td>
                   <td>{dur}</td>
                   <td>{fmt(l.tickets_synced)}</td>
                   <td><span className={"status-pill pill-"+l.status}>{l.status}</span></td>
                 </tr>
+                {l.error && (
+                  <tr>
+                    <td colSpan={5} style={{padding:"0 10px 10px",borderBottom:"1px solid #f2f4f7"}}>
+                      <div style={{background:"#fef3f2",border:"1px solid #fecdca",borderRadius:7,padding:"8px 12px",fontSize:11,color:"#b42318",fontFamily:"monospace",wordBreak:"break-word"}}>
+                        {l.error}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               );
             })}</tbody>
           </table>
