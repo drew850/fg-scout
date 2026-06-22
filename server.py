@@ -31,14 +31,104 @@ CF_RESOLUTION       = "11375"
 CF_ADDL_RESOLUTION  = "11421"
 CF_SECONDARY_REASON = "9969"
 
-# ── Database ───────────────────────────────────────────────────────────────────
+# ── Database (pg8000 — pure Python, no system libs) ────────────────────────────
+# Compatibility shim so existing psycopg2-style code works unchanged.
+import re as _re
+
+class _DictRow(dict):
+    pass
+
+class _CursorWrap:
+    """Wraps a pg8000 cursor to support psycopg2-style %s params and dict rows."""
+    def __init__(self, cur, as_dict=False):
+        self._cur = cur
+        self._as_dict = as_dict
+
+    def execute(self, query, params=None):
+        # pg8000 uses %s paramstyle (format) — same as psycopg2, so pass through.
+        # But pg8000 requires params as a tuple/list; convert None to no-arg call.
+        if params is None:
+            self._cur.execute(query)
+        else:
+            self._cur.execute(query, tuple(params))
+        return self
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        if self._as_dict:
+            cols = [d[0] for d in self._cur.description]
+            return _DictRow(zip(cols, row))
+        return row
+
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        if self._as_dict:
+            cols = [d[0] for d in self._cur.description]
+            return [_DictRow(zip(cols, r)) for r in rows]
+        return rows
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+class _ConnWrap:
+    """Wraps a pg8000 connection to support cursor_factory kwarg."""
+    def __init__(self, conn):
+        self._conn = conn
+        self.autocommit = False
+
+    def cursor(self, cursor_factory=None):
+        as_dict = cursor_factory is not None
+        return _CursorWrap(self._conn.cursor(), as_dict=as_dict)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+# Fake psycopg2.extras module so `import psycopg2.extras` and RealDictCursor work
+class _FakeExtras:
+    RealDictCursor = object
+import sys as _sys
+import types as _types
+_fake_psycopg2 = _types.ModuleType("psycopg2")
+_fake_psycopg2.extras = _FakeExtras()
+_sys.modules.setdefault("psycopg2", _fake_psycopg2)
+_sys.modules.setdefault("psycopg2.extras", _FakeExtras())
+
+def _parse_db_url(url):
+    # postgresql://user:pass@host:port/dbname  (also postgres://)
+    m = _re.match(r'^postgres(?:ql)?://([^:]+):([^@]+)@([^:/]+):?(\d+)?/(.+)$', url)
+    if not m:
+        raise ValueError("Could not parse DATABASE_URL")
+    user, password, host, port, dbname = m.groups()
+    # Strip query string from dbname if present
+    dbname = dbname.split("?")[0]
+    return {
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": int(port) if port else 5432,
+        "database": dbname,
+    }
+
 def get_db():
     try:
-        import psycopg2
-        import psycopg2.extras
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = False
-        return conn
+        import pg8000.dbapi
+        cfg = _parse_db_url(DATABASE_URL)
+        conn = pg8000.dbapi.connect(
+            user=cfg["user"],
+            password=cfg["password"],
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+        )
+        return _ConnWrap(conn)
     except Exception as e:
         print(f"[DB] Connection failed: {e}")
         return None
