@@ -491,10 +491,11 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
     try:
         import psycopg2.extras
         cur = conn.cursor()
-        while True:
+        stop = False
+        while not stop:
             params = {
                 "limit": 100,
-                "order_by": "updated_datetime:asc",
+                "order_by": "updated_datetime:desc",
             }
             if cursor:
                 params["cursor"] = cursor
@@ -503,25 +504,25 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             if not tickets:
                 break
 
-            # Filter client-side since Gorgias doesn't support date range filter
-            filtered = [t for t in tickets if t.get("updated_datetime","") >= since_str]
-
-            for t in filtered:
+            for t in tickets:
+                updated = t.get("updated_datetime", "") or ""
+                if updated < since_str:
+                    # Newest-first ordering means everything after this is older too.
+                    stop = True
+                    break
                 upsert_ticket(cur, t)
                 total += 1
 
-            if total % 100 == 0 and total > 0:
-                conn.commit()
+            conn.commit()
+            if total > 0:
                 print(f"[Sync] {total} tickets synced...")
+
+            if stop:
+                break
 
             meta = data.get("meta", {})
             next_cursor = meta.get("next_cursor")
             if not next_cursor:
-                break
-
-            # Stop paginating if all remaining tickets are older than since_dt
-            last_updated = tickets[-1].get("updated_datetime", "")
-            if last_updated < since_str:
                 break
 
             cursor = next_cursor
@@ -556,8 +557,8 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
         conn.close()
     return total
 
-def run_backfill():
-    """One-time backfill from 1st of previous month."""
+def run_backfill(force=False):
+    """One-time backfill from 1st of previous month. force=True bypasses the skip check."""
     today = date.today()
     if today.month == 1:
         start = date(today.year - 1, 12, 1)
@@ -573,7 +574,7 @@ def run_backfill():
         cur.execute("SELECT COUNT(*) FROM scout_tickets")
         count = cur.fetchone()[0]
         conn.close()
-        if count > 0:
+        if count > 0 and not force:
             print(f"[Backfill] Skipping — {count} tickets already in DB")
             return
     except:
@@ -1479,7 +1480,7 @@ class Handler(BaseHTTPRequestHandler):
             if not user or user["role"] != "admin":
                 self._json({"error": "Admin only"}, 403)
                 return
-            threading.Thread(target=run_backfill, daemon=True).start()
+            threading.Thread(target=lambda: run_backfill(force=True), daemon=True).start()
             self._json({"ok": True, "message": "Backfill started"})
             return
 
