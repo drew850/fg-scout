@@ -878,17 +878,17 @@ EMERGENCY_HTML = """<!DOCTYPE html>
 <title>Scout — Emergency Access</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0a;display:flex;align-items:center;justify-content:center;min-height:100vh}}
-  .card{{background:#111;border:1px solid #1e1e1e;border-radius:12px;padding:40px;width:360px}}
-  .logo{{font-size:11px;color:#333;text-transform:uppercase;letter-spacing:2px;margin-bottom:28px}}
-  h2{{color:#e0e0e0;font-size:20px;font-weight:500;margin-bottom:8px}}
-  p{{color:#444;font-size:13px;margin-bottom:28px;line-height:1.5}}
-  label{{display:block;color:#555;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
-  input{{width:100%;background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;color:#e0e0e0;font-size:14px;padding:10px 14px;margin-bottom:20px;outline:none}}
-  input:focus{{border-color:#333}}
-  button{{width:100%;background:#1a1a1a;border:1px solid #222;border-radius:8px;color:#aaa;font-size:14px;padding:11px;cursor:pointer}}
-  button:hover{{background:#1e1e1e;color:#e0e0e0}}
-  .error{{background:#1a0a0a;border:1px solid #3a1a1a;border-radius:8px;color:#e06060;font-size:13px;padding:10px 14px;margin-bottom:20px}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f6f7f9;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+  .card{{background:#fff;border:1px solid #e6e8eb;border-radius:14px;padding:40px;width:360px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
+  .logo{{font-size:11px;color:#98a2b3;text-transform:uppercase;letter-spacing:2px;margin-bottom:28px}}
+  h2{{color:#1a1d21;font-size:20px;font-weight:600;margin-bottom:8px}}
+  p{{color:#667085;font-size:13px;margin-bottom:28px;line-height:1.5}}
+  label{{display:block;color:#667085;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
+  input{{width:100%;background:#fff;border:1px solid #d0d5dd;border-radius:8px;color:#1a1d21;font-size:14px;padding:10px 14px;margin-bottom:20px;outline:none}}
+  input:focus{{border-color:#2970ff}}
+  button{{width:100%;background:#2970ff;border:none;border-radius:8px;color:#fff;font-size:14px;padding:11px;cursor:pointer;font-weight:500}}
+  button:hover{{background:#1c5fe0}}
+  .error{{background:#fef3f2;border:1px solid #fecdca;border-radius:8px;color:#b42318;font-size:13px;padding:10px 14px;margin-bottom:20px}}
 </style>
 </head>
 <body>
