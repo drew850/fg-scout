@@ -1091,22 +1091,40 @@ Remember: exclude Jamie (the bot) from human-agent analysis unless explicitly as
 
 def execute_chat_sql(sql):
     """Run a SELECT-only query, return rows as list of dicts."""
-    sql_clean = sql.strip().upper()
-    if not sql_clean.startswith("SELECT"):
+    sql_clean = sql.strip()
+    # Must start with SELECT or WITH (CTEs are read-only and valid)
+    upper = sql_clean.upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
         return None, "Only SELECT queries are allowed"
-    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE"]
+
+    # Block multiple statements (e.g. "SELECT ...; DROP TABLE ...")
+    # Allow a single trailing semicolon only.
+    body = sql_clean.rstrip(";")
+    if ";" in body:
+        return None, "Multiple statements are not allowed"
+
+    # Strip single-quoted string literals before keyword scanning, so a search term
+    # like '%update order%' doesn't trip the UPDATE guard. We only scan the SQL structure.
+    structure = _re.sub(r"'(?:[^']|'')*'", "''", upper)
+
+    # Match dangerous keywords only as whole words (so 'created_date' won't trip 'CREATE').
+    forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
+                 "GRANT", "REVOKE", "MERGE"]
     for word in forbidden:
-        if word in sql_clean:
+        if _re.search(r'\b' + word + r'\b', structure):
             return None, f"Forbidden keyword: {word}"
-    if "LIMIT" not in sql_clean:
-        sql = sql.rstrip(";") + " LIMIT 100"
+
+    if "LIMIT" not in upper:
+        sql_clean = body + " LIMIT 100"
+    else:
+        sql_clean = body
     conn = get_db()
     if not conn:
         return None, "Database unavailable"
     try:
         import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql)
+        cur.execute(sql_clean)
         rows = [dict(r) for r in cur.fetchall()]
         return rows, None
     except Exception as e:
