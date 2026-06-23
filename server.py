@@ -852,10 +852,13 @@ SAMPLE TICKETS WITH TRANSCRIPTS:
                 prompt += f"Transcript (excerpt):\n{st['transcript'][:800]}\n"
 
         # Call Claude
+        bot_context = ("\n\nIMPORTANT CONTEXT: 'Jamie' is our automated AI chatbot (Yuma), NOT a human agent. "
+                       "When analyzing agent performance, treat Jamie separately as the bot — do not rank it "
+                       "against human agents or praise it as a top performer. Human agents are everyone else.")
         payload = json.dumps({
             "model": "claude-sonnet-4-6",
-            "max_tokens": 2000,
-            "system": config["system"],
+            "max_tokens": 4000,
+            "system": config["system"] + bot_context,
             "messages": [{"role": "user", "content": prompt}]
         }).encode()
 
@@ -945,16 +948,61 @@ Columns: ticket_id (bigint), subject (text), status (text), initial_channel (tex
   ticket_resolution_l1 (text), ticket_resolution_l2 (text),
   additional_resolution_l1 (text), additional_resolution_l2 (text),
   additional_reason_l1 (text), additional_reason_l2 (text),
-  tags (text), message_count (integer), transcript (text),
+  tags (text), message_count (integer), transcript (text), transcript_fetched (boolean),
   first_seen_at (timestamptz), last_updated_at (timestamptz)
 
 Common contact_reason_l1 values: Cancel, Order Issue, Order Status, Subscription, Troubleshooting, Other, Update Order
 Common status values: open, closed
-Use ILIKE for case-insensitive text matching.
-Always include LIMIT 100 unless user asks for counts/aggregates.
-Only generate SELECT statements. Never INSERT, UPDATE, DELETE, DROP, or ALTER.
-Return only the SQL query, nothing else.
+
+IMPORTANT CONTEXT:
+- 'Jamie' in the agent column is our automated AI chatbot (Yuma), NOT a human agent. When asked about
+  agent performance or human agents, exclude Jamie (agent != 'Jamie') unless the user specifically asks about the bot.
+- Structured fields (contact_reason, product, resolution) are tagged by agents and may be incomplete or generic.
+  For nuanced questions — like the real reasons behind cancellations, customer sentiment, or why people are
+  unhappy — the structured fields often aren't enough. The actual answer lives in the 'transcript' column
+  (the customer's own words). Prefer reading transcripts for "why" questions.
+- transcript may be empty if transcript_fetched = false. You can request transcripts to be fetched (see below).
+
+Query rules:
+- Use ILIKE for case-insensitive text matching.
+- Always include LIMIT 100 unless the user asks for counts/aggregates.
+- Only generate SELECT statements. Never INSERT, UPDATE, DELETE, DROP, or ALTER.
 """
+
+def fetch_transcripts_for_ids(ticket_ids):
+    """On-demand: fetch + cache transcripts for specific ticket IDs that don't have them yet."""
+    if not ticket_ids:
+        return 0
+    conn = get_db()
+    if not conn:
+        return 0
+    fetched = 0
+    try:
+        import psycopg2.extras
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Only fetch ones we don't already have
+        placeholders = ",".join(["%s"] * len(ticket_ids))
+        cur.execute(f"""
+            SELECT ticket_id FROM scout_tickets
+            WHERE ticket_id IN ({placeholders})
+              AND (transcript_fetched = false OR transcript IS NULL OR transcript = '')
+        """, tuple(ticket_ids))
+        missing = [r["ticket_id"] for r in cur.fetchall()]
+        ucur = conn.cursor()
+        for tid in missing[:50]:  # cap at 50 per request to control latency/cost
+            transcript = fetch_messages_for_ticket(tid)
+            ucur.execute("""
+                UPDATE scout_tickets SET transcript = %s, transcript_fetched = true
+                WHERE ticket_id = %s
+            """, (transcript or "", tid))
+            fetched += 1
+        conn.commit()
+    except Exception as e:
+        print(f"[Chat] Transcript fetch error: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+    return fetched
 
 def chat_query(messages):
     """Multi-turn chat agent. messages = [{role, content}]. Returns answer text."""
@@ -963,17 +1011,21 @@ You answer questions about customer support tickets stored in a PostgreSQL datab
 
 {SCHEMA_CONTEXT}
 
-When asked a question:
-1. Generate a SQL SELECT query to answer it
-2. Return ONLY the SQL query wrapped in <sql></sql> tags
-3. After seeing results, provide a clear natural language answer
+How to respond:
+1. To query structured data, return a SQL SELECT wrapped in <sql></sql> tags.
+2. If answering the question well requires reading customer verbatims (e.g. "why are people cancelling?",
+   "what are customers saying about X?"), first run a SQL query that SELECTs ticket_id (and transcript)
+   for the relevant tickets. If those transcripts aren't fetched yet, the system will fetch them and
+   re-run, so just write the query selecting ticket_id, transcript, and relevant columns with a LIMIT.
+3. After seeing results, provide a clear, concise natural-language answer. When citing customer sentiment,
+   summarize themes from the transcripts — don't quote personal data like emails or full names.
 
-If the question is a follow-up referencing previous context, use that context to refine the query.
-Never expose raw customer emails or personal data in your answer summaries."""
+Never expose raw customer emails or personal data in your answer summaries.
+Remember: exclude Jamie (the bot) from human-agent analysis unless explicitly asked."""
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 1000,
+        "max_tokens": 1500,
         "system": system,
         "messages": messages
     }).encode()
@@ -1268,7 +1320,7 @@ class Handler(BaseHTTPRequestHandler):
                     FROM scout_tickets
                     WHERE created_date >= %s AND created_date < %s
                       AND agent IS NOT NULL AND agent != ''
-                    GROUP BY agent ORDER BY cnt DESC LIMIT 10
+                    GROUP BY agent ORDER BY cnt DESC
                 """, (ws, we))
                 by_agent = [dict(r) for r in cur.fetchall()]
 
@@ -1607,14 +1659,37 @@ class Handler(BaseHTTPRequestHandler):
                     ]
                     final_response = chat_query(final_messages)
                     self._json({"response": final_response, "sql": sql, "error": err})
-                else:
-                    result_summary = json.dumps(rows[:50], default=str) if rows else "No results found."
-                    final_messages = messages + [
-                        {"role": "assistant", "content": ai_response},
-                        {"role": "user", "content": f"SQL results: {result_summary}\n\nPlease provide a clear, concise answer based on these results."}
-                    ]
-                    final_response = chat_query(final_messages)
-                    self._json({"response": final_response, "sql": sql, "row_count": len(rows) if rows else 0})
+                    return
+
+                # If the query pulled ticket_ids whose transcripts aren't fetched yet,
+                # fetch them on-demand, then re-run so the answer can use verbatims.
+                wants_transcript = "transcript" in sql.lower()
+                needs_fetch = []
+                if wants_transcript and rows:
+                    for r in rows:
+                        tid = r.get("ticket_id")
+                        tr  = r.get("transcript")
+                        if tid and (tr is None or tr == ""):
+                            needs_fetch.append(tid)
+                if needs_fetch:
+                    fetched = fetch_transcripts_for_ids(needs_fetch)
+                    print(f"[Chat] Fetched {fetched} transcripts on-demand")
+                    # Re-run the same SQL to pick up freshly-stored transcripts
+                    rows, err2 = execute_chat_sql(sql)
+                    if err2:
+                        rows = rows or []
+
+                result_summary = json.dumps(rows[:50], default=str) if rows else "No results found."
+                final_messages = messages + [
+                    {"role": "assistant", "content": ai_response},
+                    {"role": "user", "content": f"SQL results: {result_summary}\n\nPlease provide a clear, concise answer based on these results. If transcripts are present, summarize the themes in the customers' own words without exposing personal data."}
+                ]
+                final_response = chat_query(final_messages)
+                self._json({
+                    "response": final_response, "sql": sql,
+                    "row_count": len(rows) if rows else 0,
+                    "transcripts_fetched": len(needs_fetch)
+                })
             else:
                 self._json({"response": ai_response, "sql": None})
             return
