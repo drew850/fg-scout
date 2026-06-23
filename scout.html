@@ -434,15 +434,26 @@ function Departments({route, weeks, selectedWeek, onWeekChange}) {
   useEffect(()=>{ loadInsight(activeDept, selectedWeek); },[activeDept, selectedWeek]);
 
   function handleRefresh(dept) {
+    const prevTs = insights[dept]?.generated_at || null;
     setRefreshing(p=>({...p,[dept]:true}));
     api(`/api/insights/${dept}/refresh`,{
       method:"POST",
       body:JSON.stringify({week:selectedWeek})
     }).then(()=>{
+      let ticks = 0;
       const timer = setInterval(()=>{
+        ticks++;
         api(`/api/insights/${dept}`+(selectedWeek?"?week="+selectedWeek:"")).then(r=>{
-          if(r.content) {
+          const newTs = r.generated_at || null;
+          if(r.run_status==="success" && r.content && newTs && newTs !== prevTs) {
             setInsights(p=>({...p,[dept]:r}));
+            setRefreshing(p=>({...p,[dept]:false}));
+            clearInterval(timer);
+          } else if(r.run_status==="error") {
+            setInsights(p=>({...p,[dept]:{...r, _genError:r.run_error||"Generation failed"}}));
+            setRefreshing(p=>({...p,[dept]:false}));
+            clearInterval(timer);
+          } else if(ticks >= 60) {
             setRefreshing(p=>({...p,[dept]:false}));
             clearInterval(timer);
           }
@@ -486,13 +497,18 @@ function Departments({route, weeks, selectedWeek, onWeekChange}) {
         </button>
       </div>
       {(isLoading || isRefreshing) && <div className="insight-loading">{isRefreshing ? "Generating insights with Claude…" : "Loading…"}</div>}
+      {!isLoading && !isRefreshing && insight?._genError && (
+        <div className="error-box" style={{marginBottom:14}}>
+          Insight generation failed: {insight._genError}
+        </div>
+      )}
       {!isLoading && !isRefreshing && insight?.content && (
         <div className="insight-box">{formatInsight(insight.content)}</div>
       )}
-      {!isLoading && !isRefreshing && !insight?.content && (
+      {!isLoading && !isRefreshing && !insight?.content && !insight?._genError && (
         <div className="insight-empty">
           No insights for this week yet.<br/>
-          <span style={{color:"#333",fontSize:12}}>Click "Refresh insights" to generate now, or wait for Tuesday's scheduled run.</span>
+          <span style={{color:"#98a2b3",fontSize:12}}>Click "Refresh insights" to generate now, or wait for Tuesday's scheduled run.</span>
         </div>
       )}
     </div>

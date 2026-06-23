@@ -220,6 +220,16 @@ def init_db():
                 error        TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scout_insight_runs (
+                department   TEXT NOT NULL,
+                week_start   DATE NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'running',
+                error        TEXT,
+                updated_at   TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (department, week_start)
+            )
+        """)
         # Seed admin user
         if ADMIN_SEED_EMAIL:
             cur.execute("""
@@ -588,8 +598,8 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
                 break
 
             # Guard against Gorgias deep-pagination limits
-            if page_num >= 500:
-                print(f"[Sync] WARN: hit page limit (500), stopping defensively")
+            if page_num >= 5000:
+                print(f"[Sync] WARN: hit page limit (5000 pages = 500k tickets), stopping defensively")
                 break
 
             cursor = next_cursor
@@ -731,14 +741,35 @@ def get_week_bounds(week_offset=0):
     last_sunday  = last_monday + timedelta(days=6)
     return last_monday, last_sunday
 
+def _set_insight_status(dept, week_start, status, error=None):
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO scout_insight_runs (department, week_start, status, error, updated_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (department, week_start) DO UPDATE SET
+                status = EXCLUDED.status, error = EXCLUDED.error, updated_at = now()
+        """, (dept, week_start, status, str(error)[:1000] if error else None))
+        conn.commit()
+    except Exception as e:
+        print(f"[Insights] status update failed: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
 def generate_insights(dept, week_start, week_end):
     """Generate Claude insights for a department and week. Returns insight text."""
     config = DEPT_CONFIGS.get(dept)
     if not config:
         return None
 
+    _set_insight_status(dept, week_start, "running")
     conn = get_db()
     if not conn:
+        _set_insight_status(dept, week_start, "error", "No DB connection")
         return None
 
     try:
@@ -872,10 +903,18 @@ SAMPLE TICKETS WITH TRANSCRIPTS:
             },
             method="POST"
         )
-        resp = urllib.request.urlopen(req, timeout=120)
-        result = json.loads(resp.read())
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+            result = json.loads(resp.read())
+        except urllib.error.HTTPError as he:
+            body = ""
+            try: body = he.read().decode()[:500]
+            except: pass
+            raise Exception(f"Claude API HTTP {he.code}: {body}")
         content = result.get("content", [])
         text = " ".join(c.get("text","") for c in content if c.get("type") == "text")
+        if not text.strip():
+            raise Exception(f"Claude returned empty content (stop_reason: {result.get('stop_reason')})")
 
         # Cache insight
         cur3 = conn.cursor()
@@ -887,14 +926,19 @@ SAMPLE TICKETS WITH TRANSCRIPTS:
                 generated_at = now()
         """, (dept, week_start, week_end, text))
         conn.commit()
+        conn.close()
+        _set_insight_status(dept, week_start, "success")
         return text
 
     except Exception as e:
         print(f"[Insights] Error for {dept}: {e}")
-        conn.rollback()
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        _set_insight_status(dept, week_start, "error", str(e))
         return None
-    finally:
-        conn.close()
 
 def run_weekly_insights():
     """Generate insights for all departments for the previous week."""
@@ -1375,15 +1419,23 @@ class Handler(BaseHTTPRequestHandler):
                     WHERE department = %s AND week_start = %s
                 """, (dept, week_start))
                 row = cur.fetchone()
+                # Get generation run status (running / success / error)
+                cur.execute("""
+                    SELECT status, error FROM scout_insight_runs
+                    WHERE department = %s AND week_start = %s
+                """, (dept, week_start))
+                run = cur.fetchone()
+                run_status = run["status"] if run else None
+                run_error  = run["error"] if run else None
                 if row:
                     self._json({"dept": dept, "week_start": week_start.isoformat(),
                                 "week_end": week_end.isoformat(), "content": row["content"],
                                 "generated_at": row["generated_at"].isoformat() if row["generated_at"] else None,
-                                "cached": True})
+                                "cached": True, "run_status": run_status, "run_error": run_error})
                 else:
                     self._json({"dept": dept, "week_start": week_start.isoformat(),
                                 "week_end": week_end.isoformat(), "content": None,
-                                "cached": False})
+                                "cached": False, "run_status": run_status, "run_error": run_error})
             except Exception as e:
                 self._json({"error": str(e)}, 500)
             finally:
