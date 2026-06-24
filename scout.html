@@ -408,11 +408,9 @@ function WeekBar({weeks, selected, onChange}) {
 
 // ── Departments ───────────────────────────────────────────────────────────────
 const DEPTS = [
-  {id:"cx",    label:"CX"},
-  {id:"marketing", label:"Marketing"},
-  {id:"sales", label:"Sales"},
-  {id:"ops",   label:"Ops"},
-  {id:"product",label:"Product"},
+  {id:"cx",      label:"CX"},
+  {id:"growth",  label:"Growth"},
+  {id:"product", label:"Product"},
 ];
 
 function Departments({route, weeks, selectedWeek, onWeekChange}) {
@@ -663,6 +661,15 @@ function DataTab() {
     }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
   }
 
+  function handleTranscripts() {
+    if(!window.confirm("Fetch transcripts for all tickets in the last 4 weeks? This runs slowly in the background and may take a while on first run.")) return;
+    setSyncing(true); setMsg("");
+    api("/api/sync/transcripts",{method:"POST"}).then(r=>{
+      setMsg(r.ok ? "Transcript fetch started — running in the background." : (r.error||"Failed"));
+      setSyncing(false); setTimeout(loadLog,2000);
+    }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
+  }
+
   const running = log?.logs?.some(l=>l.status==="running");
   const lastSync = log?.logs?.[0];
 
@@ -678,7 +685,7 @@ function DataTab() {
           <div className={"dot "+( running?"dot-amber": lastSync?.status==="success"?"dot-green": lastSync?.status==="error"?"dot-red":"dot-gray")}/>
           <span>{running ? "Sync in progress…" : lastSync ? "Last sync: "+fmtDT(lastSync.started_at)+" · "+lastSync.tickets_synced+" tickets" : "No sync history"}</span>
         </div>
-        <div style={{color:"#333",fontSize:12}}>Total tickets in database: <span style={{color:"#555"}}>{fmt(log?.total_tickets)}</span></div>
+        <div style={{color:"#667085",fontSize:12}}>Total tickets in database: <span style={{color:"#344054",fontWeight:500}}>{fmt(log?.total_tickets)}</span></div>
       </div>
       <div className="card">
         <div className="card-title">Manual sync</div>
@@ -689,14 +696,22 @@ function DataTab() {
             {syncing?"Starting…":"Run sync"}
           </button>
         </div>
-        {msg && <div style={{fontSize:12,color:msg.includes("error")||msg.includes("Failed")?"#f87171":"#4ade80"}}>{msg}</div>}
+        {msg && <div style={{fontSize:12,color:msg.includes("error")||msg.includes("Failed")?"#b42318":"#067647"}}>{msg}</div>}
+        <hr className="section-sep"/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+          <div style={{flex:1,paddingRight:16}}>
+            <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Fetch recent transcripts</div>
+            <div style={{fontSize:12,color:"#667085"}}>Pulls full ticket transcripts for the last 4 weeks so the chat agent can answer detailed questions from customer verbatims. Runs slowly in the background. Auto-tops-up during daily sync.</div>
+          </div>
+          <button className="btn-primary" disabled={syncing} onClick={handleTranscripts} style={{whiteSpace:"nowrap"}}>Fetch transcripts</button>
+        </div>
         <hr className="section-sep"/>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div>
-            <div style={{fontSize:13,color:"#666",marginBottom:4}}>Full backfill</div>
-            <div style={{fontSize:12,color:"#333"}}>Re-pulls all tickets from the 1st of the previous month</div>
+          <div style={{flex:1,paddingRight:16}}>
+            <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Full backfill</div>
+            <div style={{fontSize:12,color:"#667085"}}>Re-pulls all tickets from the 1st of the previous month</div>
           </div>
-          <button className="btn-danger" disabled={syncing} onClick={handleBackfill}>Re-run backfill</button>
+          <button className="btn-danger" disabled={syncing} onClick={handleBackfill} style={{whiteSpace:"nowrap"}}>Re-run backfill</button>
         </div>
       </div>
       <div className="card">
@@ -813,9 +828,7 @@ function Settings({currentUser}) {
                 <select className="select-field" value={form.department} onChange={e=>setForm(p=>({...p,department:e.target.value}))}>
                   <option value="">All</option>
                   <option value="cx">CX</option>
-                  <option value="marketing">Marketing</option>
-                  <option value="sales">Sales</option>
-                  <option value="ops">Ops</option>
+                  <option value="growth">Growth</option>
                   <option value="product">Product</option>
                 </select>
               </div>

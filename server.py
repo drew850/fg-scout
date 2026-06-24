@@ -230,6 +230,18 @@ def init_db():
                 PRIMARY KEY (department, week_start)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scout_csat (
+                id             BIGINT PRIMARY KEY,
+                ticket_id      BIGINT,
+                score          INTEGER,
+                comment        TEXT,
+                created_date   TIMESTAMPTZ,
+                customer_email TEXT,
+                raw_json       JSONB,
+                synced_at      TIMESTAMPTZ DEFAULT now()
+            )
+        """)
         # Seed admin user
         if ADMIN_SEED_EMAIL:
             cur.execute("""
@@ -666,6 +678,9 @@ def run_backfill(force=False):
         log_id = None
 
     run_sync(since, sync_type="backfill", log_id=log_id)
+    # Sync CSAT for the same window as the ticket backfill.
+    print("[CSAT] Starting post-backfill CSAT sync...")
+    run_csat_sync(since_dt=since)
 
 def run_daily_sync():
     """Daily sync — tickets updated in last 25 hours (buffer for timezone drift)."""
@@ -686,8 +701,219 @@ def run_daily_sync():
         log_id = None
     print("[Sync] Running daily sync...")
     run_sync(since, sync_type="daily", log_id=log_id)
+    # After syncing tickets, top up transcripts for the recent window (background).
+    print("[Transcripts] Starting post-sync transcript top-up...")
+    run_transcript_backfill(max_fetches=2000)
+    # Sync recent CSAT responses (last ~30 days is plenty for daily top-up).
+    print("[CSAT] Starting post-sync CSAT top-up...")
+    run_csat_sync(since_dt=datetime.now(timezone.utc) - timedelta(days=30))
+
+def get_transcript_window_start():
+    """Monday of 4 weeks ago (start of a 4-full-week window)."""
+    today = date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    return this_monday - timedelta(weeks=3)  # this week + 3 prior = 4 weeks
+
+def run_transcript_backfill(max_fetches=2000):
+    """
+    Fetch transcripts for all tickets in the last 4 weeks (Monday-aligned).
+    - Closed tickets: fetch once (transcript_fetched=true and not empty → skip).
+    - Open tickets: re-fetch each run (still accumulating messages).
+    Throttled and capped per run so it stays bounded and avoids rate limits.
+    Designed to run slowly in the background.
+    """
+    window_start = get_transcript_window_start()
+    ws = window_start.isoformat()
+    conn = get_db()
+    if not conn:
+        print("[Transcripts] No DB connection")
+        return 0
+
+    log_id = None
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO scout_sync_log (sync_type, status) VALUES ('transcripts','running') RETURNING id")
+        log_id = cur.fetchone()[0]
+        conn.commit()
+    except Exception as e:
+        print(f"[Transcripts] could not create log: {e}")
+        try: conn.rollback()
+        except: pass
+
+    fetched = 0
+    try:
+        import psycopg2.extras
+        # Candidates: tickets in window that are either open (always re-fetch)
+        # or closed without a transcript yet.
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT ticket_id, status FROM scout_tickets
+            WHERE created_date >= %s
+              AND (
+                    status = 'open'
+                 OR transcript_fetched = false
+                 OR transcript IS NULL
+                 OR transcript = ''
+              )
+            ORDER BY created_date DESC
+        """, (ws,))
+        candidates = cur.fetchall()
+        print(f"[Transcripts] window from {ws}: {len(candidates)} candidates (cap {max_fetches})")
+
+        ucur = conn.cursor()
+        for row in candidates:
+            if fetched >= max_fetches:
+                print(f"[Transcripts] hit per-run cap ({max_fetches}), will continue next run")
+                break
+            tid = row["ticket_id"]
+            transcript = fetch_messages_for_ticket(tid)
+            ucur.execute("""
+                UPDATE scout_tickets SET transcript = %s, transcript_fetched = true
+                WHERE ticket_id = %s
+            """, (transcript or "", tid))
+            fetched += 1
+            if fetched % 100 == 0:
+                conn.commit()
+                print(f"[Transcripts] {fetched} fetched...")
+                time.sleep(1)  # breather every 100
+            else:
+                time.sleep(0.15)  # gentle pace
+        conn.commit()
+
+        if log_id:
+            lc = get_db()
+            if lc:
+                lcur = lc.cursor()
+                lcur.execute("""
+                    UPDATE scout_sync_log SET finished_at = now(), tickets_synced = %s, status = 'success'
+                    WHERE id = %s
+                """, (fetched, log_id))
+                lc.commit(); lc.close()
+        print(f"[Transcripts] DONE — {fetched} transcripts fetched")
+    except Exception as e:
+        import traceback
+        print(f"[Transcripts] ERROR after {fetched}: {e}")
+        print(traceback.format_exc())
+        try: conn.rollback()
+        except: pass
+        if log_id:
+            try:
+                lc = get_db()
+                if lc:
+                    lcur = lc.cursor()
+                    lcur.execute("""
+                        UPDATE scout_sync_log SET finished_at = now(), tickets_synced = %s, status = 'error', error = %s
+                        WHERE id = %s
+                    """, (fetched, str(e)[:1000], log_id))
+                    lc.commit(); lc.close()
+            except: pass
+    finally:
+        try: conn.close()
+        except: pass
+    return fetched
+
+def run_csat_sync(since_dt=None):
+    """
+    Sync Gorgias CSAT (satisfaction survey) responses into scout_csat.
+    Aligned to the ticket data range. Upserts on survey id, links by ticket_id.
+    """
+    if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
+        print("[CSAT] Gorgias credentials not configured")
+        return 0
+    conn = get_db()
+    if not conn:
+        return 0
+
+    # Default: align with ticket backfill window (1st of previous month)
+    if since_dt is None:
+        today = date.today()
+        if today.month == 1:
+            start = date(today.year - 1, 12, 1)
+        else:
+            start = date(today.year, today.month - 1, 1)
+        since_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    total = 0
+    cursor = None
+    page = 0
+    try:
+        cur = conn.cursor()
+        stop = False
+        while not stop:
+            page += 1
+            params = {"limit": 100, "order_by": "created_datetime:desc"}
+            if cursor:
+                params["cursor"] = cursor
+            data = None
+            for attempt in range(1, 4):
+                try:
+                    data = gorgias_request("/satisfaction-surveys", params)
+                    break
+                except urllib.error.HTTPError as he:
+                    if he.code == 429:
+                        time.sleep(5 * attempt)
+                    elif he.code == 404:
+                        print("[CSAT] /satisfaction-surveys not available (404) — skipping CSAT sync")
+                        conn.close()
+                        return 0
+                    elif he.code >= 500:
+                        time.sleep(3 * attempt)
+                    else:
+                        raise
+                except Exception as ne:
+                    print(f"[CSAT] page={page} error attempt {attempt}: {ne}")
+                    time.sleep(3 * attempt)
+            if data is None:
+                raise Exception(f"Failed to fetch CSAT page {page}")
+
+            surveys = data.get("data", [])
+            if not surveys:
+                break
+
+            for s in surveys:
+                created = s.get("created_datetime", "") or ""
+                if created and created < since_str:
+                    stop = True
+                    break
+                # Gorgias survey: score, body/comment, ticket_id, customer
+                sid = s.get("id")
+                tid = s.get("ticket_id") or (s.get("ticket") or {}).get("id")
+                score = s.get("score")
+                comment = s.get("body_text") or s.get("comment") or s.get("body") or ""
+                cust = s.get("customer") or {}
+                cur.execute("""
+                    INSERT INTO scout_csat (id, ticket_id, score, comment, created_date, customer_email, raw_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        score = EXCLUDED.score, comment = EXCLUDED.comment,
+                        ticket_id = EXCLUDED.ticket_id, raw_json = EXCLUDED.raw_json
+                """, (sid, tid, score, comment[:5000], created or None, cust.get("email",""), json.dumps(s)))
+                total += 1
+
+            conn.commit()
+            meta = data.get("meta", {})
+            cursor = meta.get("next_cursor")
+            if not cursor or stop:
+                break
+            if page >= 2000:
+                break
+            time.sleep(0.15)
+        conn.commit()
+        print(f"[CSAT] DONE — {total} surveys synced")
+    except Exception as e:
+        print(f"[CSAT] ERROR after {total}: {e}")
+        try: conn.rollback()
+        except: pass
+    finally:
+        try: conn.close()
+        except: pass
+    return total
 
 # ── Insight generation ─────────────────────────────────────────────────────────
+# Product return/replacement rate threshold for flagging (changeable). 0.05 = 5%.
+PRODUCT_RETURN_RATE_THRESHOLD = float(os.environ.get("PRODUCT_RETURN_RATE_THRESHOLD", "0.05"))
+
 DEPT_CONFIGS = {
     "cx": {
         "name": "Customer Experience",
@@ -698,38 +924,37 @@ Focus on: agent performance patterns, ticket volume trends, repeat contact signa
 Structure your response with clear sections: Key Metrics, Notable Patterns, Risks & Flags, Recommended Actions.
 Be specific and data-driven. Reference actual numbers from the data provided."""
     },
-    "marketing": {
-        "name": "Marketing",
-        "filters": {"contact_reason_l1": ["Other", "Cancel"]},
-        "system": """You are an analytics expert reviewing customer support data for Freedom Grooming (Freebird).
-Analyze this week's ticket data and surface insights for the Marketing team.
-Focus on: subscription unawareness rate, product confusion, customer sentiment themes, voice-of-customer signals, messaging gaps, and campaign-related feedback.
-Structure your response with clear sections: Key Metrics, Customer Sentiment, Messaging Gaps, VOC Highlights, Recommended Actions.
-Be specific. Quote from transcripts where relevant to illustrate points."""
-    },
-    "sales": {
-        "name": "Sales",
-        "filters": {"contact_reason_l1": ["Cancel", "Subscription"]},
-        "system": """You are an analytics expert reviewing customer support data for Freedom Grooming (Freebird).
-Analyze this week's ticket data and surface insights for the Sales team.
-Focus on: cancellation reasons, save rate signals, subscription awareness issues, upgrade/downgrade patterns, and retention opportunities.
-Structure your response with clear sections: Key Metrics, Cancel Reason Breakdown, Save Opportunities, Retention Signals, Recommended Actions."""
-    },
-    "ops": {
-        "name": "Operations / Fulfillment",
-        "filters": {"contact_reason_l1": ["Order Issue", "Order Status", "Update Order"]},
-        "system": """You are an analytics expert reviewing customer support data for Freedom Grooming (Freebird).
-Analyze this week's ticket data and surface insights for the Operations and Fulfillment team.
-Focus on: shipping failures, wrong item rates, return rates, damaged/lost packages, address issues, and fulfillment SLA signals.
-Structure your response with clear sections: Key Metrics, Fulfillment Issues, Shipping Patterns, Return & Replacement Rate, Recommended Actions."""
+    "growth": {
+        "name": "Growth",
+        "filters": {},
+        "system": """You are an analytics expert reviewing customer support data, CSAT survey responses, and customer verbatims for Freedom Grooming (Freebird), a grooming and electric shaver subscription company.
+Analyze this week's data and surface insights for the Growth team (marketing & acquisition).
+
+Answer these specific questions, drawing primarily from ticket transcripts and CSAT comments (the customers' own words), not just structured tags:
+1. Which product features did people purchase our product for? (What features/benefits do customers mention as their reason for buying?)
+2. What customer use cases emerge that we could lean into for marketing? (How/where/why are customers actually using the product?)
+3. Was there anything customers saw or heard that especially influenced their purchase? (Ads, referrals, reviews, social, word-of-mouth, specific claims.)
+4. What themes emerge across CSAT comments and customer sentiment? (Positive drivers worth amplifying, and any recurring praise.)
+
+Structure your response with clear sections: Purchase Motivations, Marketable Use Cases, Purchase Influences, Review & Sentiment Themes, Recommended Actions.
+Quote representative customer phrasing where it illustrates a theme (but never expose names or emails). Focus on patterns across many customers, not one-offs.
+Note: Judge.me review integration is planned for a future version — for now, base review/sentiment themes on CSAT comments and support transcripts."""
     },
     "product": {
         "name": "Product",
-        "filters": {"contact_reason_l1": ["Troubleshooting", "Order Issue"]},
-        "system": """You are an analytics expert reviewing customer support data for Freedom Grooming (Freebird).
-Analyze this week's ticket data and surface insights for the Product team.
-Focus on: defect rates, broken blades, charging issues, product-specific complaint patterns, recurring failures, and feature feedback.
-Structure your response with clear sections: Key Metrics, Defect & Quality Signals, Product-Specific Breakdown, Recurring Issues, Recommended Actions."""
+        "filters": {"contact_reason_l1": ["Troubleshooting", "Order Issue", "Order Status", "Update Order"]},
+        "system": """You are an analytics expert reviewing product quality signals for Freedom Grooming (Freebird), a grooming and electric shaver subscription company.
+Analyze this week's data for the Product team. IMPORTANT: identify meaningful TRENDS and patterns across many tickets — do NOT dwell on individual customer cases.
+
+Address these specifically:
+1. Quality-related return and replacement RATES BY PRODUCT, including the trend versus prior months, and flag any product whose return/replacement rate exceeds the established threshold (provided in the data).
+2. Primary return and warranty REASON CODES — the leading drivers of dissatisfaction and product failures.
+3. Key Voice-of-Customer (VOC) themes from complaints, reviews, and support contacts — emerging issues, recurring pain points, areas where performance may be deteriorating.
+4. Any significant MONTH-OVER-MONTH increases in return rates, replacement rates, complaint volume, or specific failure modes.
+
+Structure your response with clear sections: Return & Replacement Rates by Product, Reason Code Analysis, VOC Themes, Month-over-Month Movement, Flags & Recommended Actions.
+
+NOTE ON DATA QUALITY: The structured resolution/reason fields are human-entered by agents and may be incomplete or inaccurate. Where transcripts are available, cross-check the structured data against what customers actually describe, and note any discrepancies you find. Be data-driven and reference actual numbers."""
     }
 }
 
@@ -860,6 +1085,86 @@ def generate_insights(dept, week_start, week_end):
                     st["transcript_fetched"] = True
         conn.commit()
 
+        # ── Department-specific data ──────────────────────────────────────
+        dept_data = ""
+
+        if dept == "growth":
+            # CSAT responses for the week (score + comment), and overall distribution
+            try:
+                cur.execute("""
+                    SELECT score, comment FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s
+                      AND comment IS NOT NULL AND comment != ''
+                    ORDER BY created_date DESC LIMIT 60
+                """, (ws, we))
+                csat_rows = [dict(r) for r in cur.fetchall()]
+                cur.execute("""
+                    SELECT score, COUNT(*) as cnt FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s AND score IS NOT NULL
+                    GROUP BY score ORDER BY score
+                """, (ws, we))
+                csat_dist = [dict(r) for r in cur.fetchall()]
+                dept_data += f"\n\nCSAT SCORE DISTRIBUTION:\n{json.dumps(csat_dist, indent=2)}"
+                dept_data += "\n\nCSAT COMMENTS (customer verbatims):\n"
+                for c in csat_rows:
+                    if c.get("comment"):
+                        dept_data += f"- [score {c.get('score')}] {c['comment'][:300]}\n"
+            except Exception as ce:
+                print(f"[Insights] CSAT pull failed: {ce}")
+
+        if dept == "product":
+            # Return/replacement rate by product for this period + prior month
+            try:
+                month_start = (week_start.replace(day=1))
+                prev_month_end = month_start
+                prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
+
+                def product_rates(d0, d1):
+                    cur.execute("""
+                        SELECT product_l1,
+                               COUNT(*) AS total,
+                               COUNT(*) FILTER (
+                                 WHERE ticket_resolution_l1 ILIKE '%return%'
+                                    OR ticket_resolution_l1 ILIKE '%replace%'
+                                    OR additional_resolution_l1 ILIKE '%return%'
+                                    OR additional_resolution_l1 ILIKE '%replace%'
+                                    OR contact_reason_l1 ILIKE '%return%'
+                               ) AS returns_replacements
+                        FROM scout_tickets
+                        WHERE created_date >= %s AND created_date < %s
+                          AND product_l1 IS NOT NULL AND product_l1 != ''
+                        GROUP BY product_l1
+                        HAVING COUNT(*) >= 5
+                        ORDER BY total DESC LIMIT 25
+                    """, (d0.isoformat(), d1.isoformat()))
+                    out = []
+                    for r in cur.fetchall():
+                        rr = dict(r)
+                        rr["rate"] = round((rr["returns_replacements"]/rr["total"]) if rr["total"] else 0, 4)
+                        rr["exceeds_threshold"] = rr["rate"] > PRODUCT_RETURN_RATE_THRESHOLD
+                        out.append(rr)
+                    return out
+
+                this_month = product_rates(month_start, date.fromisoformat(we))
+                prev_month  = product_rates(prev_month_start, prev_month_end)
+                dept_data += f"\n\nRETURN/REPLACEMENT RATE THRESHOLD: {PRODUCT_RETURN_RATE_THRESHOLD:.0%} (products above this should be flagged)"
+                dept_data += f"\n\nPRODUCT RETURN/REPLACEMENT RATES — CURRENT MONTH (from {month_start}):\n{json.dumps(this_month, indent=2, default=str)}"
+                dept_data += f"\n\nPRODUCT RETURN/REPLACEMENT RATES — PRIOR MONTH ({prev_month_start} to {prev_month_end}) for MoM comparison:\n{json.dumps(prev_month, indent=2, default=str)}"
+
+                # Reason code breakdown
+                cur.execute("""
+                    SELECT ticket_resolution_l1, ticket_resolution_l2, COUNT(*) as cnt
+                    FROM scout_tickets
+                    WHERE created_date >= %s AND created_date < %s
+                      AND (ticket_resolution_l1 ILIKE '%return%' OR ticket_resolution_l1 ILIKE '%replace%'
+                           OR ticket_resolution_l1 ILIKE '%warrant%')
+                    GROUP BY ticket_resolution_l1, ticket_resolution_l2 ORDER BY cnt DESC LIMIT 20
+                """, (ws, we))
+                reason_codes = [dict(r) for r in cur.fetchall()]
+                dept_data += f"\n\nRETURN/WARRANTY REASON CODES (this week):\n{json.dumps(reason_codes, indent=2)}"
+            except Exception as pe:
+                print(f"[Insights] Product rate calc failed: {pe}")
+
         # Build prompt
         prompt = f"""Week: {week_start} to {week_end}
 
@@ -874,6 +1179,7 @@ AGENT BREAKDOWN:
 
 RESOLUTION BREAKDOWN:
 {json.dumps(resolutions, indent=2)}
+{dept_data}
 
 SAMPLE TICKETS WITH TRANSCRIPTS:
 """
@@ -1033,7 +1339,7 @@ def fetch_transcripts_for_ids(ticket_ids):
         """, tuple(ticket_ids))
         missing = [r["ticket_id"] for r in cur.fetchall()]
         ucur = conn.cursor()
-        for tid in missing[:50]:  # cap at 50 per request to control latency/cost
+        for tid in missing[:80]:  # cap per request to control latency/cost
             transcript = fetch_messages_for_ticket(tid)
             ucur.execute("""
                 UPDATE scout_tickets SET transcript = %s, transcript_fetched = true
@@ -1050,26 +1356,42 @@ def fetch_transcripts_for_ids(ticket_ids):
 
 def chat_query(messages):
     """Multi-turn chat agent. messages = [{role, content}]. Returns answer text."""
-    system = f"""You are a data analyst assistant for Freedom Grooming (Freebird) support operations.
-You answer questions about customer support tickets stored in a PostgreSQL database.
+    today = date.today()
+    # Compute current week (Mon-Sun) and last week for relative date references
+    this_monday = today - timedelta(days=today.weekday())
+    last_monday = this_monday - timedelta(days=7)
+    last_sunday = this_monday - timedelta(days=1)
+    system = f"""You are Scout, an expert customer-support and business analyst for Freedom Grooming (Freebird), a grooming and electric shaver subscription company. You have access to the company's support ticket database, CSAT survey responses, and customer transcripts.
+
+You are a knowledgeable analyst FIRST and a SQL engine second. Think of the ticket database as your source material — like a researcher who has read all the tickets. Use it to inform genuinely helpful, reasoned answers. You can:
+- Answer conceptual or advisory questions using your business understanding (e.g. "how could we reduce cancellations?", "what should we worry about?") — query the data to ground your answer in evidence, then reason like an analyst.
+- Run data queries for specific metrics and synthesize the results into clear insight, not just raw numbers.
+- Read customer transcripts to understand the "why" behind patterns, and summarize themes.
+- Combine both: pull data, interpret it, add context and recommendations.
+
+You don't have to query for every question. If a question is conceptual and you can answer well by querying supporting evidence and reasoning over it, do that. If a question genuinely needs no data (e.g. "what does CTF mean?"), just answer. But for anything about what's actually happening in the business, ground it in the data.
+
+TODAY'S DATE is {today.isoformat()} ({today.strftime('%A, %B %d, %Y')}).
+- The data starts from May 1, {today.year}. All tickets are from {today.year}.
+- Date/ranges without a year (e.g. "June 15-21", "last month") ALWAYS mean the CURRENT year ({today.year}). Never default to 2024.
+- "this week" = {this_monday.isoformat()} onward. "last week" = {last_monday.isoformat()} to {last_sunday.isoformat()}. Weeks run Monday-Sunday.
 
 {SCHEMA_CONTEXT}
 
-How to respond:
-1. To query structured data, return a SQL SELECT wrapped in <sql></sql> tags.
-2. If answering the question well requires reading customer verbatims (e.g. "why are people cancelling?",
-   "what are customers saying about X?"), first run a SQL query that SELECTs ticket_id (and transcript)
-   for the relevant tickets. If those transcripts aren't fetched yet, the system will fetch them and
-   re-run, so just write the query selecting ticket_id, transcript, and relevant columns with a LIMIT.
-3. After seeing results, provide a clear, concise natural-language answer. When citing customer sentiment,
-   summarize themes from the transcripts — don't quote personal data like emails or full names.
+There is also a scout_csat table: id, ticket_id, score (integer, higher = more satisfied), comment (customer's verbatim feedback), created_date, customer_email. Join to scout_tickets on ticket_id when useful.
 
-Never expose raw customer emails or personal data in your answer summaries.
-Remember: exclude Jamie (the bot) from human-agent analysis unless explicitly asked."""
+HOW TO WORK:
+1. To pull data, emit a SQL SELECT wrapped in <sql></sql> tags. The system runs it and returns results, then you write your analysis.
+2. For "why"/sentiment/nuance questions, SELECT ticket_id AND transcript (and/or csat comment) for candidate tickets — the system auto-fetches missing transcripts and re-runs. Then READ them and synthesize themes.
+3. The structured resolution/reason fields are human-entered and imperfect — when it matters, cross-check against transcripts.
+4. If a query returns nothing, check the date year, then try broader terms before concluding there's no data.
+5. Always deliver an analyst's answer: lead with the insight, support with numbers, add brief interpretation or a recommendation when useful. Don't just dump rows.
+
+Never expose raw customer emails or full names. Exclude Jamie (the AI bot) from human-agent analysis unless explicitly asked about the bot."""
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "system": system,
         "messages": messages
     }).encode()
@@ -1662,6 +1984,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             threading.Thread(target=lambda: run_backfill(force=True), daemon=True).start()
             self._json({"ok": True, "message": "Backfill started"})
+            return
+
+        # ── API: Fetch recent transcripts (manual, admin) ──────────────────
+        if path == "/api/sync/transcripts":
+            token = self._get_token()
+            session = verify_session(token)
+            if not session:
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            user = get_user(session["email"])
+            if not user or user["role"] != "admin":
+                self._json({"error": "Admin only"}, 403)
+                return
+            # Larger cap for the manual initial pass
+            threading.Thread(target=lambda: run_transcript_backfill(max_fetches=100000), daemon=True).start()
+            self._json({"ok": True, "message": "Transcript fetch started (runs in background)"})
+            return
+
+        # ── Cron: transcript top-up ────────────────────────────────────────
+        if path == "/api/cron/transcripts":
+            threading.Thread(target=lambda: run_transcript_backfill(max_fetches=5000), daemon=True).start()
+            self._json({"ok": True, "message": "Transcript top-up started"})
             return
 
         # ── API: Refresh insights ─────────────────────────────────────────
