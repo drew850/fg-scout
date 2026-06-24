@@ -2056,56 +2056,73 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "messages required"}, 400)
                 return
 
-            # Step 1: Ask Claude for SQL
-            ai_response = chat_query(messages)
+            # Agentic loop: the model may query, see results, refine, and query again,
+            # up to a few rounds, before giving a final answer. We only surface the
+            # final natural-language answer to the user (not intermediate SQL/reasoning).
+            convo = list(messages)
+            last_sql = None
+            total_transcripts = 0
+            total_rows = 0
+            MAX_ROUNDS = 4
+            final_answer = None
 
-            # Step 2: Extract and run SQL if present
-            sql = None
-            if "<sql>" in ai_response and "</sql>" in ai_response:
-                sql = ai_response.split("<sql>")[1].split("</sql>")[0].strip()
+            for round_i in range(MAX_ROUNDS):
+                ai_response = chat_query(convo)
 
-            if sql:
+                # Extract SQL if present
+                sql = None
+                if "<sql>" in ai_response and "</sql>" in ai_response:
+                    sql = ai_response.split("<sql>")[1].split("</sql>")[0].strip()
+
+                if not sql:
+                    # No query requested → this is the final answer.
+                    final_answer = ai_response.strip()
+                    # Defensive: strip any stray/empty sql artifacts
+                    if "<sql>" in final_answer:
+                        final_answer = final_answer.split("<sql>")[0].strip()
+                    break
+
+                last_sql = sql
                 rows, err = execute_chat_sql(sql)
+
                 if err:
-                    final_messages = messages + [
+                    convo = convo + [
                         {"role": "assistant", "content": ai_response},
-                        {"role": "user", "content": f"SQL error: {err}. Please try a different approach."}
+                        {"role": "user", "content": f"That query errored: {err}. Try a different approach, or if you have enough information already, give your final answer."}
                     ]
-                    final_response = chat_query(final_messages)
-                    self._json({"response": final_response, "sql": sql, "error": err})
-                    return
+                    continue
 
-                # If the query pulled ticket_ids whose transcripts aren't fetched yet,
-                # fetch them on-demand, then re-run so the answer can use verbatims.
-                wants_transcript = "transcript" in sql.lower()
-                needs_fetch = []
-                if wants_transcript and rows:
-                    for r in rows:
-                        tid = r.get("ticket_id")
-                        tr  = r.get("transcript")
-                        if tid and (tr is None or tr == ""):
-                            needs_fetch.append(tid)
-                if needs_fetch:
-                    fetched = fetch_transcripts_for_ids(needs_fetch)
-                    print(f"[Chat] Fetched {fetched} transcripts on-demand")
-                    # Re-run the same SQL to pick up freshly-stored transcripts
-                    rows, err2 = execute_chat_sql(sql)
-                    if err2:
-                        rows = rows or []
+                # On-demand transcript fetch if the query asked for transcripts
+                if "transcript" in sql.lower() and rows:
+                    needs = [r.get("ticket_id") for r in rows
+                             if r.get("ticket_id") and not (r.get("transcript") or "").strip()]
+                    if needs:
+                        fetched = fetch_transcripts_for_ids(needs)
+                        total_transcripts += fetched
+                        print(f"[Chat] round {round_i+1}: fetched {fetched} transcripts")
+                        rows, _ = execute_chat_sql(sql)
 
+                total_rows = len(rows) if rows else 0
                 result_summary = json.dumps(rows[:50], default=str) if rows else "No results found."
-                final_messages = messages + [
+                convo = convo + [
                     {"role": "assistant", "content": ai_response},
-                    {"role": "user", "content": f"SQL results: {result_summary}\n\nPlease provide a clear, concise answer based on these results. If transcripts are present, summarize the themes in the customers' own words without exposing personal data."}
+                    {"role": "user", "content": f"Query results ({total_rows} rows):\n{result_summary}\n\nIf this answers the question, give your final analysis now (no more SQL). If you need to refine or look deeper, emit another <sql> query. Summarize transcript themes in the customers' words without exposing names or emails."}
                 ]
-                final_response = chat_query(final_messages)
-                self._json({
-                    "response": final_response, "sql": sql,
-                    "row_count": len(rows) if rows else 0,
-                    "transcripts_fetched": len(needs_fetch)
-                })
-            else:
-                self._json({"response": ai_response, "sql": None})
+
+            # If we exhausted rounds without a clean final answer, ask once more for a plain answer.
+            if final_answer is None:
+                convo = convo + [{"role": "user", "content": "Please give your best final answer now based on what you've found, with no further SQL."}]
+                final_answer = chat_query(convo).strip()
+                # Strip any stray sql block from the final answer
+                if "<sql>" in final_answer:
+                    final_answer = final_answer.split("<sql>")[0].strip() or "I wasn't able to fully resolve that — try rephrasing the question."
+
+            self._json({
+                "response": final_answer,
+                "sql": last_sql,
+                "row_count": total_rows,
+                "transcripts_fetched": total_transcripts
+            })
             return
 
         # ── API: Add user ─────────────────────────────────────────────────
