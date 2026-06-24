@@ -670,6 +670,14 @@ function DataTab() {
     }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
   }
 
+  function handleCsatSync() {
+    setSyncing(true); setMsg("");
+    api("/api/cron/csat",{method:"POST"}).then(r=>{
+      setMsg(r.ok ? "CSAT sync started — running in the background." : (r.error||"Failed"));
+      setSyncing(false); setTimeout(loadLog,2000);
+    }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
+  }
+
   const running = log?.logs?.some(l=>l.status==="running");
   const lastSync = log?.logs?.[0];
 
@@ -704,6 +712,14 @@ function DataTab() {
             <div style={{fontSize:12,color:"#667085"}}>Pulls full ticket transcripts for the last 4 weeks so the chat agent can answer detailed questions from customer verbatims. Runs slowly in the background. Auto-tops-up during daily sync.</div>
           </div>
           <button className="btn-primary" disabled={syncing} onClick={handleTranscripts} style={{whiteSpace:"nowrap"}}>Fetch transcripts</button>
+        </div>
+        <hr className="section-sep"/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+          <div style={{flex:1,paddingRight:16}}>
+            <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Sync CSAT surveys</div>
+            <div style={{fontSize:12,color:"#667085"}}>Pulls satisfaction survey responses from Gorgias (last 30 days), including unanswered surveys. Used to compute response rate and surface five-star verbatims in CX insights. Auto-runs during daily sync.</div>
+          </div>
+          <button className="btn-primary" disabled={syncing} onClick={handleCsatSync} style={{whiteSpace:"nowrap"}}>Sync CSAT</button>
         </div>
         <hr className="section-sep"/>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>

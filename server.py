@@ -2050,6 +2050,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "message": "Transcript top-up started"})
             return
 
+        # ── Cron / manual: CSAT sync ───────────────────────────────────────
+        if path == "/api/cron/csat":
+            since_dt = datetime.now(timezone.utc) - timedelta(days=30)
+            threading.Thread(target=lambda: run_csat_sync(since_dt=since_dt), daemon=True).start()
+            self._json({"ok": True, "message": "CSAT sync started — last 30 days"})
+            return
+
         # ── API: Refresh insights ─────────────────────────────────────────
         if path.startswith("/api/insights/") and path.endswith("/refresh"):
             token = self._get_token()
