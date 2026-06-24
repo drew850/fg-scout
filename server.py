@@ -921,7 +921,8 @@ DEPT_CONFIGS = {
         "system": """You are an analytics expert reviewing CX support data for Freedom Grooming (Freebird), a grooming and electric shaver subscription company.
 Analyze this week's ticket data and provide insights for the CX leadership team.
 Focus on: agent performance patterns, ticket volume trends, repeat contact signals, resolution quality, coaching opportunities, and operational bottlenecks.
-Structure your response with clear sections: Key Metrics, Notable Patterns, Risks & Flags, Recommended Actions.
+Structure your response with clear sections: Key Metrics, CSAT Highlights, Notable Patterns, Risks & Flags, Recommended Actions.
+The CSAT Highlights section must include: Avg CSAT score (out of 5), Surveys Sent count, Response Rate %, and exactly 3 five-star verbatims worth sharing with the team — choose the most specific and meaningful ones, not generic one-liners. If fewer than 3 five-star verbatims exist, include all available ones.
 Be specific and data-driven. Reference actual numbers from the data provided."""
     },
     "growth": {
@@ -1087,6 +1088,47 @@ def generate_insights(dept, week_start, week_end):
 
         # ── Department-specific data ──────────────────────────────────────
         dept_data = ""
+
+        if dept == "cx":
+            # CSAT stats for the week: sent, responded, response rate, avg score, 5-star verbatims
+            try:
+                cur.execute("""
+                    SELECT
+                        COUNT(*)                                                      AS surveys_sent,
+                        COUNT(*) FILTER (WHERE score IS NOT NULL)                    AS surveys_responded,
+                        ROUND(AVG(score) FILTER (WHERE score IS NOT NULL)::numeric, 2) AS avg_score
+                    FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s
+                """, (ws, we))
+                csat_stats  = dict(cur.fetchone() or {})
+                sent        = int(csat_stats.get("surveys_sent") or 0)
+                responded   = int(csat_stats.get("surveys_responded") or 0)
+                avg_score   = csat_stats.get("avg_score")
+                rate        = round((responded / sent * 100), 1) if sent else 0
+                dept_data  += f"\n\nCSAT SUMMARY ({week_start} to {week_end}):"
+                dept_data  += f"\n- Surveys Sent: {sent}"
+                dept_data  += f"\n- Surveys Responded: {responded}"
+                dept_data  += f"\n- Response Rate: {rate}%"
+                dept_data  += f"\n- Avg CSAT Score: {float(avg_score):.2f} / 5" if avg_score is not None else "\n- Avg CSAT Score: N/A"
+
+                # Five-star verbatims — pick most substantive ones (longest first, capped at 5 candidates)
+                cur.execute("""
+                    SELECT comment FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s
+                      AND score = 5
+                      AND comment IS NOT NULL AND comment != ''
+                    ORDER BY LENGTH(comment) DESC
+                    LIMIT 5
+                """, (ws, we))
+                five_star = [r["comment"] for r in cur.fetchall()]
+                if five_star:
+                    dept_data += "\n\n5-STAR VERBATIMS (pick the 3 most meaningful for CSAT Highlights):\n"
+                    for v in five_star:
+                        dept_data += f"- {v[:400]}\n"
+                else:
+                    dept_data += "\n\n5-STAR VERBATIMS: None this week."
+            except Exception as ce:
+                print(f"[Insights] CX CSAT pull failed: {ce}")
 
         if dept == "growth":
             # CSAT responses for the week (score + comment), and overall distribution
