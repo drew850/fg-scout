@@ -496,22 +496,34 @@ def upsert_ticket(cur, t):
         json.dumps(t)
     ))
 
+# ── Sync debug log (in-memory ring buffer, surfaced via /api/sync/debug) ───────
+SYNC_DEBUG = []
+def slog(msg):
+    try:
+        SYNC_DEBUG.append(datetime.now(timezone.utc).strftime("%H:%M:%S") + " " + str(msg))
+        if len(SYNC_DEBUG) > 600:
+            del SYNC_DEBUG[:len(SYNC_DEBUG) - 600]
+    except Exception:
+        pass
+    print(msg)
+
+
 def run_sync(since_dt, sync_type="manual", log_id=None):
     """Fetch all tickets updated since since_dt, upsert into DB."""
     if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
-        print("[Sync] Gorgias credentials not configured")
+        slog("[Sync] Gorgias credentials not configured")
         return 0
 
     conn = get_db()
     if not conn:
-        print("[Sync] ERROR: no DB connection")
+        slog("[Sync] ERROR: no DB connection")
         return 0
 
     total = 0
     page_num = 0
     cursor = None
     since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00") if isinstance(since_dt, datetime) else since_dt
-    print(f"[Sync] START type={sync_type} since={since_str} log_id={log_id}")
+    slog(f"[Sync] START type={sync_type} since={since_str} log_id={log_id}")
 
     def update_log_progress(status="running", error=None):
         """Persist current progress to the sync log immediately."""
@@ -537,7 +549,7 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             lc.commit()
             lc.close()
         except Exception as le:
-            print(f"[Sync] WARN: could not update log: {le}")
+            slog(f"[Sync] WARN: could not update log: {le}")
 
     try:
         cur = conn.cursor()
@@ -558,32 +570,32 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
                     body = ""
                     try: body = he.read().decode()[:300]
                     except: pass
-                    print(f"[Sync] page={page_num} HTTP {he.code} attempt {attempt}/3: {body}")
+                    slog(f"[Sync] page={page_num} HTTP {he.code} attempt {attempt}/3: {body}")
                     if he.code == 429:
                         wait = 5 * attempt
-                        print(f"[Sync] rate limited, waiting {wait}s")
+                        slog(f"[Sync] rate limited, waiting {wait}s")
                         time.sleep(wait)
                     elif he.code >= 500:
                         time.sleep(3 * attempt)
                     else:
                         raise
                 except Exception as ne:
-                    print(f"[Sync] page={page_num} network error attempt {attempt}/3: {ne}")
+                    slog(f"[Sync] page={page_num} network error attempt {attempt}/3: {ne}")
                     time.sleep(3 * attempt)
             if data is None:
                 raise Exception(f"Failed to fetch page {page_num} after 3 attempts")
 
             tickets = data.get("data", [])
-            print(f"[Sync] page={page_num} fetched={len(tickets)} total_so_far={total}")
+            slog(f"[Sync] page={page_num} fetched={len(tickets)} total_so_far={total}")
             if not tickets:
-                print(f"[Sync] page={page_num} empty, stopping")
+                slog(f"[Sync] page={page_num} empty, stopping")
                 break
 
             page_upserted = 0
             for t in tickets:
                 updated = t.get("updated_datetime", "") or ""
                 if updated < since_str:
-                    print(f"[Sync] reached cutoff at ticket {t.get('id')} ({updated} < {since_str}), stopping")
+                    slog(f"[Sync] reached cutoff at ticket {t.get('id')} ({updated} < {since_str}), stopping")
                     stop = True
                     break
                 try:
@@ -591,14 +603,14 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
                     total += 1
                     page_upserted += 1
                 except Exception as ue:
-                    print(f"[Sync] WARN: upsert failed for ticket {t.get('id')}: {ue}")
+                    slog(f"[Sync] WARN: upsert failed for ticket {t.get('id')}: {ue}")
                     # roll back just this row's failed statement, keep going
                     conn.rollback()
                     cur = conn.cursor()
 
             conn.commit()
             update_log_progress("running")
-            print(f"[Sync] page={page_num} upserted={page_upserted} committed, total={total}")
+            slog(f"[Sync] page={page_num} upserted={page_upserted} committed, total={total}")
 
             if stop:
                 break
@@ -606,12 +618,12 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             meta = data.get("meta", {})
             next_cursor = meta.get("next_cursor")
             if not next_cursor:
-                print(f"[Sync] no next_cursor after page {page_num}, reached end")
+                slog(f"[Sync] no next_cursor after page {page_num}, reached end")
                 break
 
             # Guard against Gorgias deep-pagination limits
             if page_num >= 5000:
-                print(f"[Sync] WARN: hit page limit (5000 pages = 500k tickets), stopping defensively")
+                slog(f"[Sync] WARN: hit page limit (5000 pages = 500k tickets), stopping defensively")
                 break
 
             cursor = next_cursor
@@ -619,11 +631,11 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
 
         conn.commit()
         update_log_progress("success")
-        print(f"[Sync] DONE type={sync_type} total={total} pages={page_num}")
+        slog(f"[Sync] DONE type={sync_type} total={total} pages={page_num}")
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print(f"[Sync] FATAL error after {total} tickets, page {page_num}: {e}")
+        slog(f"[Sync] FATAL error after {total} tickets, page {page_num}: {e}")
         print(tb)
         try:
             conn.rollback()
@@ -679,7 +691,7 @@ def run_backfill(force=False):
 
     run_sync(since, sync_type="backfill", log_id=log_id)
     # Sync CSAT for the same window as the ticket backfill.
-    print("[CSAT] Starting post-backfill CSAT sync...")
+    slog("[CSAT] Starting post-backfill CSAT sync...")
     run_csat_sync(since_dt=since)
 
 def run_daily_sync():
@@ -699,13 +711,13 @@ def run_daily_sync():
     except:
         conn.close()
         log_id = None
-    print("[Sync] Running daily sync...")
+    slog("[Sync] Running daily sync...")
     run_sync(since, sync_type="daily", log_id=log_id)
     # After syncing tickets, top up transcripts for the recent window (background).
-    print("[Transcripts] Starting post-sync transcript top-up...")
+    slog("[Transcripts] Starting post-sync transcript top-up...")
     run_transcript_backfill(max_fetches=2000)
     # Sync recent CSAT responses (last ~30 days is plenty for daily top-up).
-    print("[CSAT] Starting post-sync CSAT top-up...")
+    slog("[CSAT] Starting post-sync CSAT top-up...")
     run_csat_sync(since_dt=datetime.now(timezone.utc) - timedelta(days=30))
 
 def get_transcript_window_start():
@@ -726,7 +738,7 @@ def run_transcript_backfill(max_fetches=2000):
     ws = window_start.isoformat()
     conn = get_db()
     if not conn:
-        print("[Transcripts] No DB connection")
+        slog("[Transcripts] No DB connection")
         return 0
 
     log_id = None
@@ -736,7 +748,7 @@ def run_transcript_backfill(max_fetches=2000):
         log_id = cur.fetchone()[0]
         conn.commit()
     except Exception as e:
-        print(f"[Transcripts] could not create log: {e}")
+        slog(f"[Transcripts] could not create log: {e}")
         try: conn.rollback()
         except: pass
 
@@ -758,12 +770,12 @@ def run_transcript_backfill(max_fetches=2000):
             ORDER BY created_date DESC
         """, (ws,))
         candidates = cur.fetchall()
-        print(f"[Transcripts] window from {ws}: {len(candidates)} candidates (cap {max_fetches})")
+        slog(f"[Transcripts] window from {ws}: {len(candidates)} candidates (cap {max_fetches})")
 
         ucur = conn.cursor()
         for row in candidates:
             if fetched >= max_fetches:
-                print(f"[Transcripts] hit per-run cap ({max_fetches}), will continue next run")
+                slog(f"[Transcripts] hit per-run cap ({max_fetches}), will continue next run")
                 break
             tid = row["ticket_id"]
             transcript = fetch_messages_for_ticket(tid)
@@ -774,7 +786,7 @@ def run_transcript_backfill(max_fetches=2000):
             fetched += 1
             if fetched % 100 == 0:
                 conn.commit()
-                print(f"[Transcripts] {fetched} fetched...")
+                slog(f"[Transcripts] {fetched} fetched...")
                 time.sleep(1)  # breather every 100
             else:
                 time.sleep(0.15)  # gentle pace
@@ -789,10 +801,10 @@ def run_transcript_backfill(max_fetches=2000):
                     WHERE id = %s
                 """, (fetched, log_id))
                 lc.commit(); lc.close()
-        print(f"[Transcripts] DONE — {fetched} transcripts fetched")
+        slog(f"[Transcripts] DONE — {fetched} transcripts fetched")
     except Exception as e:
         import traceback
-        print(f"[Transcripts] ERROR after {fetched}: {e}")
+        slog(f"[Transcripts] ERROR after {fetched}: {e}")
         print(traceback.format_exc())
         try: conn.rollback()
         except: pass
@@ -812,13 +824,13 @@ def run_transcript_backfill(max_fetches=2000):
         except: pass
     return fetched
 
-def run_csat_sync(since_dt=None):
+def run_csat_sync(since_dt=None, log_id=None):
     """
     Sync Gorgias CSAT (satisfaction survey) responses into scout_csat.
     Aligned to the ticket data range. Upserts on survey id, links by ticket_id.
     """
     if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
-        print("[CSAT] Gorgias credentials not configured")
+        slog("[CSAT] Gorgias credentials not configured")
         return 0
     conn = get_db()
     if not conn:
@@ -837,6 +849,41 @@ def run_csat_sync(since_dt=None):
     total = 0
     cursor = None
     page = 0
+
+    # Log CSAT runs to scout_sync_log so they appear in the sync history.
+    if log_id is None:
+        try:
+            lc = get_db()
+            if lc:
+                lcur = lc.cursor()
+                lcur.execute("INSERT INTO scout_sync_log (sync_type) VALUES ('csat') RETURNING id")
+                log_id = lcur.fetchone()[0]
+                lc.commit(); lc.close()
+        except Exception as le:
+            slog(f"[CSAT] WARN: could not create sync log: {le}")
+
+    def update_csat_log(status="running", error=None):
+        if not log_id:
+            return
+        try:
+            lc = get_db()
+            if not lc:
+                return
+            lcur = lc.cursor()
+            if error:
+                lcur.execute("UPDATE scout_sync_log SET finished_at=now(), tickets_synced=%s, status=%s, error=%s WHERE id=%s",
+                             (total, status, str(error)[:2000], log_id))
+            elif status == "success":
+                lcur.execute("UPDATE scout_sync_log SET finished_at=now(), tickets_synced=%s, status=%s WHERE id=%s",
+                             (total, status, log_id))
+            else:
+                lcur.execute("UPDATE scout_sync_log SET tickets_synced=%s, status=%s WHERE id=%s",
+                             (total, status, log_id))
+            lc.commit(); lc.close()
+        except Exception as le:
+            slog(f"[CSAT] WARN: could not update sync log: {le}")
+
+    slog(f"[CSAT] START since={since_str} log_id={log_id}")
     try:
         cur = conn.cursor()
         stop = False
@@ -854,7 +901,7 @@ def run_csat_sync(since_dt=None):
                     if he.code == 429:
                         time.sleep(5 * attempt)
                     elif he.code == 404:
-                        print("[CSAT] /satisfaction-surveys not available (404) — skipping CSAT sync")
+                        slog("[CSAT] /satisfaction-surveys not available (404) — skipping CSAT sync")
                         conn.close()
                         return 0
                     elif he.code >= 500:
@@ -862,7 +909,7 @@ def run_csat_sync(since_dt=None):
                     else:
                         raise
                 except Exception as ne:
-                    print(f"[CSAT] page={page} error attempt {attempt}: {ne}")
+                    slog(f"[CSAT] page={page} error attempt {attempt}: {ne}")
                     time.sleep(3 * attempt)
             if data is None:
                 raise Exception(f"Failed to fetch CSAT page {page}")
@@ -894,15 +941,19 @@ def run_csat_sync(since_dt=None):
             conn.commit()
             meta = data.get("meta", {})
             cursor = meta.get("next_cursor")
+            slog(f"[CSAT] page={page} fetched={len(surveys)} total={total} more={'yes' if cursor else 'no'}")
+            update_csat_log("running")
             if not cursor or stop:
                 break
             if page >= 2000:
                 break
             time.sleep(0.15)
         conn.commit()
-        print(f"[CSAT] DONE — {total} surveys synced")
+        slog(f"[CSAT] DONE — {total} surveys synced")
+        update_csat_log("success")
     except Exception as e:
-        print(f"[CSAT] ERROR after {total}: {e}")
+        slog(f"[CSAT] ERROR after {total}: {e}")
+        update_csat_log("error", error=e)
         try: conn.rollback()
         except: pass
     finally:
@@ -1850,6 +1901,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 500)
             finally:
                 conn.close()
+            return
+
+        # ── API: Sync debug log (in-memory, recent sync events) ───────────
+        if path == "/api/sync/debug":
+            token = self._get_token()
+            if not verify_session(token):
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            self._json({"lines": list(SYNC_DEBUG)})
             return
 
         # ── API: Users list (admin only) ──────────────────────────────────

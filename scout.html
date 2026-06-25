@@ -637,6 +637,12 @@ function DataTab() {
   const [syncing, setSyncing] = useState(false);
   const [since, setSince]   = useState("");
   const [msg, setMsg]       = useState("");
+  const [debug, setDebug]     = useState(null);
+  const [showDebug, setShowDebug] = useState(false);
+
+  function loadDebug() {
+    api("/api/sync/debug").then(r=>setDebug(r.lines||[])).catch(()=>{});
+  }
 
   function loadLog() {
     api("/api/sync/log").then(r=>{ setLog(r); setLoading(false); }).catch(()=>setLoading(false));
@@ -680,6 +686,13 @@ function DataTab() {
 
   const running = log?.logs?.some(l=>l.status==="running");
   const lastSync = log?.logs?.[0];
+
+  useEffect(()=>{
+    if(!showDebug) return;
+    loadDebug();
+    const t = setInterval(loadDebug, running ? 5000 : 12000);
+    return ()=>clearInterval(t);
+  }, [showDebug, running]);
 
   return (
     <div>
@@ -764,6 +777,22 @@ function DataTab() {
             })}</tbody>
           </table>
         )}
+      </div>
+      <div className="card">
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div className="card-title" style={{marginBottom:0}}>Debug log</div>
+          <button className="btn-primary" style={{padding:"6px 12px",fontSize:12}} onClick={()=>{ const ns=!showDebug; setShowDebug(ns); if(ns) loadDebug(); }}>
+            {showDebug?"Hide":"Show"} debug log
+          </button>
+        </div>
+        {showDebug && (
+          <div style={{marginTop:12,background:"#0d1b2a",color:"#cfe0f5",borderRadius:8,padding:"10px 12px",maxHeight:340,overflowY:"auto",fontFamily:"monospace",fontSize:11,lineHeight:1.65}}>
+            {(!debug || !debug.length)
+              ? <div style={{color:"#7a8aa0"}}>No debug output yet. Run a sync and progress will stream here.</div>
+              : debug.map((line,i)=><div key={i} style={{whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{line}</div>)}
+          </div>
+        )}
+        {showDebug && <div style={{fontSize:11,color:"#98a2b3",marginTop:6}}>Recent sync activity — start, per-page progress, completion, errors. Auto-refreshes {running?"every 5s while a sync runs.":"every 12s."}</div>}
       </div>
     </div>
   );
