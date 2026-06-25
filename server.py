@@ -973,7 +973,10 @@ DEPT_CONFIGS = {
 Analyze this week's ticket data and provide insights for the CX leadership team.
 Focus on: agent performance patterns, ticket volume trends, repeat contact signals, resolution quality, coaching opportunities, and operational bottlenecks.
 Structure your response with clear sections: Key Metrics, CSAT Highlights, Notable Patterns, Risks & Flags, Recommended Actions.
-The CSAT Highlights section must include: Avg CSAT score (out of 5), Surveys Sent count, Response Rate %, and exactly 3 five-star verbatims worth sharing with the team — choose the most specific and meaningful ones, not generic one-liners. If fewer than 3 five-star verbatims exist, include all available ones.
+The CSAT Highlights section must include:
+- Headline metrics: Avg CSAT score (out of 5), Surveys Sent, Response Rate %, and the score distribution (how many 1/2/3/4/5-star).
+- Exactly 3 five-star verbatims worth sharing with the team — the most specific and meaningful ones, not generic one-liners — each attributed with the customer name and ticket ID exactly as provided in the data (format: -- Customer Name, Ticket #12345). If fewer than 3 exist, include all available ones.
+- Insights worth discussing: 3 to 5 short, specific observations the CX team should actually talk about. Go beyond restating the numbers. Identify recurring themes in BOTH the praise and the low-score (1-2 star) feedback, what appears to be driving satisfaction up or down, any concerning or repeated complaints, and where coaching or a process change could move the score. Reference the relevant ticket numbers. Then finish with 2 to 3 concrete discussion questions or talking points for the next CSAT review. If there is little low-score feedback, say so plainly rather than inventing problems.
 Be specific and data-driven. Reference actual numbers from the data provided."""
     },
     "growth": {
@@ -1164,20 +1167,57 @@ def generate_insights(dept, week_start, week_end):
 
                 # Five-star verbatims — pick most substantive ones (longest first, capped at 5 candidates)
                 cur.execute("""
-                    SELECT comment FROM scout_csat
-                    WHERE created_date >= %s AND created_date < %s
-                      AND score = 5
-                      AND comment IS NOT NULL AND comment != ''
-                    ORDER BY LENGTH(comment) DESC
+                    SELECT c.ticket_id,
+                           c.comment,
+                           COALESCE(NULLIF(t.customer_name, ''), NULLIF(c.customer_email, ''), 'Unknown') AS customer_name
+                    FROM scout_csat c
+                    LEFT JOIN scout_tickets t ON t.ticket_id = c.ticket_id
+                    WHERE c.created_date >= %s AND c.created_date < %s
+                      AND c.score = 5
+                      AND c.comment IS NOT NULL AND c.comment != ''
+                    ORDER BY LENGTH(c.comment) DESC
                     LIMIT 5
                 """, (ws, we))
-                five_star = [r["comment"] for r in cur.fetchall()]
+                five_star = [dict(r) for r in cur.fetchall()]
                 if five_star:
-                    dept_data += "\n\n5-STAR VERBATIMS (pick the 3 most meaningful for CSAT Highlights):\n"
+                    dept_data += "\n\n5-STAR VERBATIMS (pick the 3 most meaningful for CSAT Highlights; keep the customer name and ticket ID with each one you choose):\n"
                     for v in five_star:
-                        dept_data += f"- {v[:400]}\n"
+                        dept_data += f"- \"{(v.get('comment') or '')[:400]}\" -- {v.get('customer_name') or 'Unknown'} (Ticket #{v.get('ticket_id')})\n"
                 else:
                     dept_data += "\n\n5-STAR VERBATIMS: None this week."
+
+                # Score distribution — helps the model see what is dragging the average
+                cur.execute("""
+                    SELECT score, COUNT(*) AS cnt FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s AND score IS NOT NULL
+                    GROUP BY score ORDER BY score
+                """, (ws, we))
+                dist = {int(r["score"]): int(r["cnt"]) for r in cur.fetchall()}
+                if dist:
+                    tot = sum(dist.values())
+                    low = dist.get(1, 0) + dist.get(2, 0)
+                    dept_data += "\n\nCSAT SCORE DISTRIBUTION (this week): " + ", ".join(f"{s}-star: {dist.get(s, 0)}" for s in range(5, 0, -1))
+                    dept_data += f"\n- Low scores (1-2 star): {low} of {tot} responses ({round(low / tot * 100, 1) if tot else 0}%)"
+
+                # Low-score (detractor) verbatims — the most discussion-worthy signal
+                cur.execute("""
+                    SELECT c.ticket_id, c.score, c.comment,
+                           COALESCE(NULLIF(t.customer_name, ''), NULLIF(c.customer_email, ''), 'Unknown') AS customer_name
+                    FROM scout_csat c
+                    LEFT JOIN scout_tickets t ON t.ticket_id = c.ticket_id
+                    WHERE c.created_date >= %s AND c.created_date < %s
+                      AND c.score <= 2
+                      AND c.comment IS NOT NULL AND c.comment != ''
+                    ORDER BY c.score ASC, LENGTH(c.comment) DESC
+                    LIMIT 8
+                """, (ws, we))
+                detractors = [dict(r) for r in cur.fetchall()]
+                if detractors:
+                    dept_data += "\n\nLOW-SCORE VERBATIMS (1-2 star -- analyze for recurring themes, root causes, and coaching/process gaps):\n"
+                    for v in detractors:
+                        dept_data += f"- [{v.get('score')}-star] \"{(v.get('comment') or '')[:400]}\" -- {v.get('customer_name') or 'Unknown'} (Ticket #{v.get('ticket_id')})\n"
+                else:
+                    dept_data += "\n\nLOW-SCORE VERBATIMS: None with comments this week."
             except Exception as ce:
                 print(f"[Insights] CX CSAT pull failed: {ce}")
 
