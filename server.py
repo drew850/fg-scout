@@ -3,6 +3,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote, urlencode
 from datetime import datetime, timezone, timedelta, date
 
+# ── Timezone: Asia/Manila is the canonical TZ for all bucketing/display (matches Gorgias). ──
+# Philippines observes no DST, so a fixed UTC+8 offset is exact year-round.
+MANILA = timezone(timedelta(hours=8))
+def now_manila():
+    return datetime.now(MANILA)
+def manila_week_bounds_iso(week_start):
+    """Given a Manila Monday (date), return (start_iso, end_iso) as Manila-aware ISO datetimes
+    (Mon 00:00 +08 .. next Mon 00:00 +08) for exact comparison against UTC TIMESTAMPTZ columns."""
+    start = datetime(week_start.year, week_start.month, week_start.day, 0, 0, 0, tzinfo=MANILA)
+    return start.isoformat(), (start + timedelta(days=7)).isoformat()
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 PORT                 = int(os.environ.get("PORT", 3810))
 DIR                  = os.path.dirname(os.path.abspath(__file__))
@@ -694,6 +705,80 @@ def run_backfill(force=False):
     slog("[CSAT] Starting post-backfill CSAT sync...")
     run_csat_sync(since_dt=since)
 
+def run_full_sync(since_dt, sync_type="manual", log_id=None):
+    """Full sync: tickets updated since since_dt, then transcript top-up, then CSAT."""
+    slog(f"[Sync] Full sync ({sync_type}) since {since_dt.isoformat()}")
+    run_sync(since_dt, sync_type=sync_type, log_id=log_id)
+    slog("[Transcripts] post-sync transcript top-up...")
+    try:
+        run_transcript_backfill(max_fetches=2000)
+    except Exception as e:
+        slog(f"[Transcripts] error: {e}")
+    slog("[CSAT] post-sync CSAT top-up...")
+    try:
+        run_csat_sync(since_dt=since_dt)
+    except Exception as e:
+        slog(f"[CSAT] error: {e}")
+
+# ── Weekly scheduler: Monday 00:00 Asia/Manila full sync (in-process, no external cron) ──
+def _weekly_run_logged_since(dt_utc):
+    conn = get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM scout_sync_log WHERE sync_type='weekly' AND started_at >= %s", (dt_utc,))
+        return (cur.fetchone()[0] or 0) > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def _run_weekly_sync():
+    since = datetime.now(timezone.utc) - timedelta(days=8)  # cover prior week + buffer; upsert is idempotent
+    conn = get_db(); log_id = None
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO scout_sync_log (sync_type) VALUES ('weekly') RETURNING id")
+            log_id = cur.fetchone()[0]; conn.commit()
+        except Exception:
+            conn.rollback()
+        finally:
+            conn.close()
+    run_full_sync(since, sync_type="weekly", log_id=log_id)
+
+def _next_monday_manila(now):
+    days_ahead = (7 - now.weekday()) % 7
+    target = (now + timedelta(days=days_ahead)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=7)
+    return target
+
+def weekly_scheduler_loop():
+    # Startup catch-up: if past this week's Manila Monday and no weekly sync logged since then, run once.
+    try:
+        now = now_manila()
+        this_monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        if not _weekly_run_logged_since(this_monday.astimezone(timezone.utc)):
+            slog("[Scheduler] Startup catch-up: no weekly sync logged since Monday, running now")
+            _run_weekly_sync()
+    except Exception as e:
+        slog(f"[Scheduler] catch-up error: {e}")
+    while True:
+        try:
+            now = now_manila()
+            target = _next_monday_manila(now)
+            secs = (target - now).total_seconds()
+            slog(f"[Scheduler] Next weekly full sync at {target.isoformat()} (in {int(secs)}s)")
+            time.sleep(max(secs, 60))
+            slog("[Scheduler] Monday 00:00 Asia/Manila reached, running weekly full sync")
+            _run_weekly_sync()
+            time.sleep(120)  # guard against double-fire within the same minute
+        except Exception as e:
+            slog(f"[Scheduler] loop error: {e}")
+            time.sleep(300)
+
 def run_daily_sync():
     """Daily sync — tickets updated in last 25 hours (buffer for timezone drift)."""
     since = datetime.now(timezone.utc) - timedelta(hours=25)
@@ -1014,8 +1099,8 @@ NOTE ON DATA QUALITY: The structured resolution/reason fields are human-entered 
 }
 
 def get_week_bounds(week_offset=0):
-    """Return (week_start, week_end) as date objects. week_offset=0 is previous Mon-Sun."""
-    today = date.today()
+    """Return (week_start, week_end) as date objects, Manila-aligned. week_offset=0 is previous Mon-Sun."""
+    today = now_manila().date()
     days_since_monday = today.weekday()
     last_monday = today - timedelta(days=days_since_monday + 7 * (1 + week_offset))
     last_sunday  = last_monday + timedelta(days=6)
@@ -1791,8 +1876,7 @@ class Handler(BaseHTTPRequestHandler):
                 week_end = week_start + timedelta(days=6)
             except:
                 week_start, week_end = get_week_bounds(0)
-            ws = week_start.isoformat()
-            we = (week_end + timedelta(days=1)).isoformat()
+            ws, we = manila_week_bounds_iso(week_start)
             conn = get_db()
             if not conn:
                 self._json({"error": "DB unavailable"}, 500)
@@ -1842,7 +1926,7 @@ class Handler(BaseHTTPRequestHandler):
                 by_agent = [dict(r) for r in cur.fetchall()]
 
                 # Previous week for WoW
-                prev_ws = (week_start - timedelta(days=7)).isoformat()
+                prev_ws, _ = manila_week_bounds_iso(week_start - timedelta(days=7))
                 prev_we = ws
                 cur.execute("""
                     SELECT COUNT(*) AS total,
@@ -1853,7 +1937,7 @@ class Handler(BaseHTTPRequestHandler):
                 prev = dict(cur.fetchone() or {})
 
                 self._json({
-                    "week_start": ws, "week_end": week_end.isoformat(),
+                    "week_start": week_start.isoformat(), "week_end": week_end.isoformat(),
                     "stats": stats, "by_reason": by_reason,
                     "by_channel": by_channel, "by_agent": by_agent,
                     "prev_week": prev
@@ -2109,7 +2193,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn.rollback()
                 finally:
                     conn.close()
-            threading.Thread(target=run_sync, args=(since, "manual", log_id), daemon=True).start()
+            threading.Thread(target=run_full_sync, args=(since, "manual", log_id), daemon=True).start()
             self._json({"ok": True, "message": "Sync started", "since": since.isoformat()})
             return
 
@@ -2458,4 +2542,5 @@ if __name__ == "__main__":
     print("=" * 50)
     init_db()
     threading.Thread(target=run_backfill, daemon=True).start()
+    threading.Thread(target=weekly_scheduler_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
