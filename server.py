@@ -28,6 +28,7 @@ GORGIAS_API_KEY      = os.environ.get("GORGIAS_API_KEY", "")
 ADMIN_SEED_EMAIL     = os.environ.get("ADMIN_SEED_EMAIL", "drew@myfreebird.com")
 EMERGENCY_PIN        = os.environ.get("EMERGENCY_PIN", "")
 DATABASE_URL         = os.environ.get("DATABASE_URL", "")
+SCOUT_API_KEY        = os.environ.get("SCOUT_API_KEY", "")  # shared key for cross-app reads (e.g. Wingman)
 ALLOWED_DOMAINS      = {"myfreebird.com", "freedom-grooming.com"}
 
 # OAuth state store (in-memory, short-lived, CSRF protection)
@@ -1861,6 +1862,87 @@ class Handler(BaseHTTPRequestHandler):
             self._html(render_emergency())
             return
 
+        # ── API: Ticket query (cross-app read for Wingman; session OR shared key) ──
+        if path == "/api/tickets/query":
+            token = self._get_token()
+            key = self.headers.get("X-Scout-Key", "")
+            authed = bool(verify_session(token)) or (SCOUT_API_KEY and key == SCOUT_API_KEY)
+            if not authed:
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            conn = get_db()
+            if not conn:
+                self._json({"error": "DB unavailable"}, 500)
+                return
+            try:
+                import psycopg2.extras
+                def _multi(name):
+                    raw = qs.get(name, [""])[0]
+                    return [v.strip() for v in raw.split(",") if v.strip()] if raw else []
+                where = []
+                params = []
+                # Date window: week (Manila Monday) takes precedence, else since/until
+                week_str = qs.get("week", [""])[0]
+                if week_str:
+                    try:
+                        ws_d = date.fromisoformat(week_str)
+                    except Exception:
+                        ws_d = get_week_bounds(0)[0]
+                    ws_iso, we_iso = manila_week_bounds_iso(ws_d)
+                    where.append("created_date >= %s AND created_date < %s"); params += [ws_iso, we_iso]
+                else:
+                    since = qs.get("since", [""])[0]
+                    until = qs.get("until", [""])[0]
+                    if since: where.append("created_date >= %s"); params.append(since)
+                    if until: where.append("created_date < %s");  params.append(until)
+                statuses = _multi("status")
+                if statuses: where.append("LOWER(status) = ANY(%s)"); params.append([s.lower() for s in statuses])
+                channels = _multi("channel")
+                if channels: where.append("LOWER(initial_channel) = ANY(%s)"); params.append([s.lower() for s in channels])
+                l1 = _multi("cr_l1")
+                if l1: where.append("contact_reason_l1 = ANY(%s)"); params.append(l1)
+                l2 = _multi("cr_l2")
+                if l2: where.append("contact_reason_l2 = ANY(%s)"); params.append(l2)
+                agents = _multi("agents")
+                if agents: where.append("LOWER(agent) = ANY(%s)"); params.append([a.lower() for a in agents])
+                try:
+                    mmin = int(qs.get("msg_min", [""])[0])
+                    where.append("message_count >= %s"); params.append(mmin)
+                except Exception: pass
+                try:
+                    mmax = int(qs.get("msg_max", [""])[0])
+                    where.append("message_count <= %s"); params.append(mmax)
+                except Exception: pass
+                try:
+                    limit = min(int(qs.get("limit", ["2000"])[0]), 10000)
+                except Exception:
+                    limit = 2000
+                light = qs.get("light", [""])[0] in ("1", "true")
+                cols = ["ticket_id", "ticket_url", "agent", "agent_email", "status", "initial_channel",
+                        "contact_reason_l1", "contact_reason_l2", "customer_email", "customer_name",
+                        "created_date", "subject", "message_count"]
+                if not light:
+                    cols.append("transcript")
+                sql = "SELECT " + ", ".join(cols) + " FROM scout_tickets"
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
+                sql += " ORDER BY created_date DESC LIMIT %s"
+                params.append(limit)
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute(sql, params)
+                rows = []
+                for r in cur.fetchall():
+                    d = dict(r)
+                    if d.get("created_date"):
+                        d["created_date"] = d["created_date"].isoformat()
+                    rows.append(d)
+                self._json({"tickets": rows, "count": len(rows)})
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+            finally:
+                conn.close()
+            return
+
         # ── API: CSV export (tickets / CSAT) ──────────────────────────────
         if path == "/api/export/tickets" or path == "/api/export/csat":
             token = self._get_token()
@@ -1878,10 +1960,13 @@ class Handler(BaseHTTPRequestHandler):
                 if is_csat:
                     cols = ["id", "ticket_id", "score", "comment", "created_date", "customer_email"]
                 else:
-                    cols = ["ticket_id", "created_date", "status", "initial_channel", "agent", "agent_email",
-                            "customer_email", "customer_name", "contact_reason_l1", "contact_reason_l2",
-                            "product_l1", "product_l2", "ticket_resolution_l1", "ticket_resolution_l2",
-                            "message_count", "ticket_url", "subject", "tags"]
+                    # Match the Gorgias manual-export format exactly: column set + order, including transcript.
+                    cols = ["ticket_id", "ticket_url", "subject", "status", "initial_channel",
+                            "created_date", "closed_date", "agent", "customer_email", "customer_name",
+                            "contact_reason_l1", "contact_reason_l2", "product_l1", "product_l2",
+                            "ticket_resolution_l1", "ticket_resolution_l2",
+                            "additional_resolution_l1", "additional_resolution_l2",
+                            "message_count", "transcript"]
                 cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 col_sql = ", ".join(cols)
                 if qs.get("all", [""])[0]:
@@ -1897,12 +1982,40 @@ class Handler(BaseHTTPRequestHandler):
                     cur.execute(f"SELECT {col_sql} FROM {table} WHERE created_date >= %s AND created_date < %s ORDER BY created_date",
                                 (ws_iso, we_iso))
                     fname = f"{table}_{ws_d.isoformat()}.csv"
+                def _dtm(v):
+                    # Gorgias exports use the account timezone (Manila), "YYYY-MM-DD HH:MM"
+                    return v.astimezone(MANILA).strftime("%Y-%m-%d %H:%M") if v else ""
                 buf = io.StringIO()
                 w = _csv.writer(buf)
                 w.writerow(cols)
                 for r in cur.fetchall():
-                    w.writerow([r.get(col) for col in cols])
-                body = buf.getvalue().encode("utf-8")
+                    if is_csat:
+                        w.writerow([r.get(col) for col in cols])
+                    else:
+                        mc = r.get("message_count")
+                        w.writerow([
+                            '="%s"' % r.get("ticket_id"),           # Excel-safe text id (no scientific notation)
+                            r.get("ticket_url") or "",
+                            r.get("subject") or "",
+                            r.get("status") or "",
+                            r.get("initial_channel") or "",
+                            _dtm(r.get("created_date")),
+                            _dtm(r.get("closed_date")),
+                            r.get("agent") or "",
+                            r.get("customer_email") or "",
+                            r.get("customer_name") or "",
+                            r.get("contact_reason_l1") or "",
+                            r.get("contact_reason_l2") or "",
+                            r.get("product_l1") or "",
+                            r.get("product_l2") or "",
+                            r.get("ticket_resolution_l1") or "",
+                            r.get("ticket_resolution_l2") or "",
+                            r.get("additional_resolution_l1") or "",
+                            r.get("additional_resolution_l2") or "",
+                            mc if mc is not None else "",
+                            r.get("transcript") or "",
+                        ])
+                body = ("\ufeff" + buf.getvalue()).encode("utf-8")   # UTF-8 BOM so Excel detects encoding
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
                 self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
