@@ -202,6 +202,21 @@ function api(path, opts={}) {
   return fetch(BASE+path, {...opts, headers}).then(r=>r.json());
 }
 
+// CSV download with auth header (anchor href can't carry the token, so fetch -> blob -> download).
+function downloadCSV(path, filename) {
+  const token = sessionStorage.getItem("scout_session") || "";
+  fetch(BASE+path, { headers: token ? {"Authorization":"Bearer "+token} : {} })
+    .then(r => { if(!r.ok) throw new Error("Export failed ("+r.status+")"); return r.blob(); })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(e => alert(e.message));
+}
+
 function hashRoute() { return window.location.hash.replace(/^#/,"") || "/dashboard"; }
 
 function fmt(n) { return (n||0).toLocaleString(); }
@@ -319,6 +334,10 @@ function Dashboard({weeks, selectedWeek, onWeekChange}) {
       {error && <div className="error-box">{error}</div>}
       {loading && <div className="empty">Loading…</div>}
       {!loading && data && <>
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          <button className="btn-sm" onClick={()=>downloadCSV("/api/export/tickets"+(selectedWeek?"?week="+selectedWeek:""), "scout_tickets_"+(selectedWeek||"latest")+".csv")}>Export tickets CSV</button>
+          <button className="btn-sm" onClick={()=>downloadCSV("/api/export/csat"+(selectedWeek?"?week="+selectedWeek:""), "scout_csat_"+(selectedWeek||"latest")+".csv")}>Export CSAT CSV</button>
+        </div>
         <div className="stats-grid">
           <div className="stat-card">
             <div className="stat-val">{fmt(data.stats?.total_tickets)}</div>
@@ -345,6 +364,24 @@ function Dashboard({weeks, selectedWeek, onWeekChange}) {
           <div className="stat-card">
             <div className="stat-val">{data.stats?.avg_messages||"—"}</div>
             <div className="stat-lbl">Avg messages</div>
+          </div>
+        </div>
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="stat-val">{fmt(data.csat?.total)}</div>
+            <div className="stat-lbl">CSAT responses</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{data.csat?.avg_score!=null?data.csat.avg_score:"—"}</div>
+            <div className="stat-lbl">Avg CSAT score</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{data.csat?.total?Math.round((data.csat.five_star/data.csat.total)*100)+"%":"—"}</div>
+            <div className="stat-lbl">5-star</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-val">{data.csat?.total?Math.round((data.csat.detractors/data.csat.total)*100)+"%":"—"}</div>
+            <div className="stat-lbl">Detractors (1–2★)</div>
           </div>
         </div>
         <div className="two-col">
@@ -385,6 +422,21 @@ function Dashboard({weeks, selectedWeek, onWeekChange}) {
           </div>
           <BarChart data={shownAgents} labelKey="agent" valueKey="cnt"/>
         </div>
+        {data.coverage && (
+          <div className="card">
+            <div className="card-title">Database coverage <span style={{fontWeight:400,color:"#98a2b3",fontSize:12}}>(everything currently in Scout)</span></div>
+            <div className="stats-grid">
+              <div className="stat-card"><div className="stat-val">{fmt(data.coverage.tickets)}</div><div className="stat-lbl">Tickets in DB</div></div>
+              <div className="stat-card"><div className="stat-val">{fmt(data.coverage.csat)}</div><div className="stat-lbl">CSAT in DB</div></div>
+              <div className="stat-card"><div className="stat-val">{fmt(data.coverage.with_transcript)}</div><div className="stat-lbl">With transcript</div></div>
+            </div>
+            <div style={{fontSize:12,color:"#475467",marginTop:10,lineHeight:1.7}}>
+              <div>Tickets span: {fmtDate(data.coverage.tickets_min)} → {fmtDate(data.coverage.tickets_max)}</div>
+              <div>CSAT span: {fmtDate(data.coverage.csat_min)} → {fmtDate(data.coverage.csat_max)}</div>
+              {data.coverage.last_sync && <div>Last sync: {data.coverage.last_sync.type} — {fmtDT(data.coverage.last_sync.finished_at||data.coverage.last_sync.started_at)} ({data.coverage.last_sync.status}{data.coverage.last_sync.tickets_synced!=null?", "+fmt(data.coverage.last_sync.tickets_synced)+" tickets":""})</div>}
+            </div>
+          </div>
+        )}
       </>}
     </div>
   );

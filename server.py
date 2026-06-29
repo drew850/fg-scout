@@ -1861,6 +1861,61 @@ class Handler(BaseHTTPRequestHandler):
             self._html(render_emergency())
             return
 
+        # ── API: CSV export (tickets / CSAT) ──────────────────────────────
+        if path == "/api/export/tickets" or path == "/api/export/csat":
+            token = self._get_token()
+            if not verify_session(token):
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            conn = get_db()
+            if not conn:
+                self._json({"error": "DB unavailable"}, 500)
+                return
+            try:
+                import io, csv as _csv, psycopg2.extras
+                is_csat = path.endswith("/csat")
+                table = "scout_csat" if is_csat else "scout_tickets"
+                if is_csat:
+                    cols = ["id", "ticket_id", "score", "comment", "created_date", "customer_email"]
+                else:
+                    cols = ["ticket_id", "created_date", "status", "initial_channel", "agent", "agent_email",
+                            "customer_email", "customer_name", "contact_reason_l1", "contact_reason_l2",
+                            "product_l1", "product_l2", "ticket_resolution_l1", "ticket_resolution_l2",
+                            "message_count", "ticket_url", "subject", "tags"]
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                col_sql = ", ".join(cols)
+                if qs.get("all", [""])[0]:
+                    cur.execute(f"SELECT {col_sql} FROM {table} ORDER BY created_date DESC")
+                    fname = f"{table}_all.csv"
+                else:
+                    week_str = qs.get("week", [""])[0]
+                    try:
+                        ws_d = date.fromisoformat(week_str) if week_str else get_week_bounds(0)[0]
+                    except Exception:
+                        ws_d = get_week_bounds(0)[0]
+                    ws_iso, we_iso = manila_week_bounds_iso(ws_d)
+                    cur.execute(f"SELECT {col_sql} FROM {table} WHERE created_date >= %s AND created_date < %s ORDER BY created_date",
+                                (ws_iso, we_iso))
+                    fname = f"{table}_{ws_d.isoformat()}.csv"
+                buf = io.StringIO()
+                w = _csv.writer(buf)
+                w.writerow(cols)
+                for r in cur.fetchall():
+                    w.writerow([r.get(col) for col in cols])
+                body = buf.getvalue().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+            finally:
+                conn.close()
+            return
+
         # ── API: Dashboard stats ──────────────────────────────────────────
         if path == "/api/dashboard":
             token = self._get_token()
@@ -1925,6 +1980,44 @@ class Handler(BaseHTTPRequestHandler):
                 """, (ws, we))
                 by_agent = [dict(r) for r in cur.fetchall()]
 
+                # CSAT for the selected week
+                cur.execute("""
+                    SELECT COUNT(*) AS total,
+                           ROUND(AVG(score)::numeric,2) AS avg_score,
+                           COUNT(*) FILTER (WHERE score = 5) AS five_star,
+                           COUNT(*) FILTER (WHERE score >= 4) AS positive,
+                           COUNT(*) FILTER (WHERE score <= 2) AS detractors
+                    FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s
+                """, (ws, we))
+                csat = dict(cur.fetchone() or {})
+                cur.execute("""
+                    SELECT score, COUNT(*) AS cnt FROM scout_csat
+                    WHERE created_date >= %s AND created_date < %s AND score IS NOT NULL
+                    GROUP BY score ORDER BY score
+                """, (ws, we))
+                csat_dist = [dict(r) for r in cur.fetchall()]
+
+                # All-time DB coverage (so it can be eyeballed against Gorgias)
+                def _iso(v): return v.isoformat() if v else None
+                cur.execute("""SELECT COUNT(*) AS tickets, MIN(created_date) AS min_d, MAX(created_date) AS max_d,
+                                      COUNT(*) FILTER (WHERE transcript_fetched) AS with_transcript
+                               FROM scout_tickets""")
+                cov_t = dict(cur.fetchone() or {})
+                cur.execute("SELECT COUNT(*) AS csat, MIN(created_date) AS min_d, MAX(created_date) AS max_d FROM scout_csat")
+                cov_c = dict(cur.fetchone() or {})
+                cur.execute("""SELECT sync_type, started_at, finished_at, status, tickets_synced
+                               FROM scout_sync_log ORDER BY started_at DESC LIMIT 1""")
+                ls = cur.fetchone()
+                coverage = {
+                    "tickets": cov_t.get("tickets"), "tickets_min": _iso(cov_t.get("min_d")), "tickets_max": _iso(cov_t.get("max_d")),
+                    "with_transcript": cov_t.get("with_transcript"),
+                    "csat": cov_c.get("csat"), "csat_min": _iso(cov_c.get("min_d")), "csat_max": _iso(cov_c.get("max_d")),
+                    "last_sync": ({"type": ls.get("sync_type"), "started_at": _iso(ls.get("started_at")),
+                                   "finished_at": _iso(ls.get("finished_at")), "status": ls.get("status"),
+                                   "tickets_synced": ls.get("tickets_synced")} if ls else None),
+                }
+
                 # Previous week for WoW
                 prev_ws, _ = manila_week_bounds_iso(week_start - timedelta(days=7))
                 prev_we = ws
@@ -1940,7 +2033,8 @@ class Handler(BaseHTTPRequestHandler):
                     "week_start": week_start.isoformat(), "week_end": week_end.isoformat(),
                     "stats": stats, "by_reason": by_reason,
                     "by_channel": by_channel, "by_agent": by_agent,
-                    "prev_week": prev
+                    "prev_week": prev,
+                    "csat": csat, "csat_dist": csat_dist, "coverage": coverage
                 })
             except Exception as e:
                 self._json({"error": str(e)}, 500)
