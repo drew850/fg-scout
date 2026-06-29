@@ -712,7 +712,7 @@ def run_full_sync(since_dt, sync_type="manual", log_id=None):
     run_sync(since_dt, sync_type=sync_type, log_id=log_id)
     slog("[Transcripts] post-sync transcript top-up...")
     try:
-        run_transcript_backfill(max_fetches=2000)
+        run_transcript_backfill(max_fetches=100000)   # cover the whole prior week, not just 2000
     except Exception as e:
         slog(f"[Transcripts] error: {e}")
     slog("[CSAT] post-sync CSAT top-up...")
@@ -807,8 +807,8 @@ def run_daily_sync():
     run_csat_sync(since_dt=datetime.now(timezone.utc) - timedelta(days=30))
 
 def get_transcript_window_start():
-    """Monday of 4 weeks ago (start of a 4-full-week window)."""
-    today = date.today()
+    """Monday of 4 weeks ago (start of a 4-full-week window), Manila-aligned."""
+    today = now_manila().date()
     this_monday = today - timedelta(days=today.weekday())
     return this_monday - timedelta(weeks=3)  # this week + 3 prior = 4 weeks
 
