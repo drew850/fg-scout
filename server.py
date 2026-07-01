@@ -1,3 +1,10 @@
+# ==============================================================================
+#  server.py  --  SCOUT  (CSAT & support-intelligence app)
+#  This is NOT Wingman. Wingman (the QA audit tool) has its own server.py with
+#  /proxy and /gorgias endpoints. They share the filename but are different apps.
+#  Scout: Gorgias -> Postgres sync, dashboard, CSAT, weekly Claude insights,
+#         Asia/Manila weekly auto-sync, CSV export, and a cross-app ticket query.
+# ==============================================================================
 import os, json, urllib.request, urllib.error, secrets, hashlib, time, threading, base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote, urlencode
@@ -261,6 +268,9 @@ def init_db():
                 VALUES (%s, %s, 'admin', true)
                 ON CONFLICT (email) DO NOTHING
             """, (ADMIN_SEED_EMAIL.split("@")[0].replace(".", " ").title(), ADMIN_SEED_EMAIL.lower()))
+        # One-time fix: earlier syncs stored the ticket_url as /app/tickets/ (plural);
+        # Gorgias's ticket view is /app/ticket/ (singular). Idempotent (no-op once clean).
+        cur.execute("UPDATE scout_tickets SET ticket_url = REPLACE(ticket_url, '/app/tickets/', '/app/ticket/') WHERE ticket_url LIKE '%/app/tickets/%'")
         conn.commit()
         print("[DB] Schema initialized")
     except Exception as e:
@@ -479,7 +489,7 @@ def upsert_ticket(cur, t):
             last_updated_at          = now()
     """, (
         t.get("id"),
-        f"https://{GORGIAS_DOMAIN}/app/tickets/{t.get('id')}",
+        f"https://{GORGIAS_DOMAIN}/app/ticket/{t.get('id')}",   # Gorgias ticket view is singular /ticket/
         t.get("subject",""),
         t.get("status",""),
         t.get("channel",""),
