@@ -1618,11 +1618,22 @@ HOW TO WORK:
 
 Never expose raw customer emails or full names. Exclude Jamie (the AI bot) from human-agent analysis unless explicitly asked about the bot."""
 
+    # The Anthropic Messages API only permits {role, content} per message. The
+    # frontend attaches UI-only fields (sql, row_count, transcripts_fetched) to
+    # assistant messages and re-sends the full history, so every turn after the
+    # first was 400ing (surfacing as a "Network error" and looking like the agent
+    # had forgotten the conversation). Strip each message down to role + content.
+    clean_messages = [
+        {"role": m.get("role"), "content": m.get("content", "")}
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    ]
+
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
         "max_tokens": 2000,
         "system": system,
-        "messages": messages
+        "messages": clean_messages
     }).encode()
 
     req = urllib.request.Request(

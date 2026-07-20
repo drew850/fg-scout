@@ -983,7 +983,11 @@ function ChatWidget() {
     const userMsg = {role:"user", content:input.trim()};
     const newMsgs = [...messages, userMsg];
     setMessages(newMsgs); setInput(""); setThinking(true);
-    api("/api/chat",{method:"POST",body:JSON.stringify({messages:newMsgs})}).then(r=>{
+    // Send only {role, content} — assistant messages carry UI-only fields (sql,
+    // row_count, transcripts_fetched) that the Messages API rejects. Backend also
+    // sanitizes; this keeps the wire payload clean regardless.
+    const wireMsgs = newMsgs.map(m=>({role:m.role, content:m.content}));
+    api("/api/chat",{method:"POST",body:JSON.stringify({messages:wireMsgs})}).then(r=>{
       setThinking(false);
       if(r.error) { setMessages(p=>[...p,{role:"assistant",content:"Error: "+r.error,sql:null}]); return; }
       setMessages(p=>[...p,{role:"assistant",content:r.response,sql:r.sql,row_count:r.row_count,transcripts_fetched:r.transcripts_fetched}]);
