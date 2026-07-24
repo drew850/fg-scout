@@ -756,6 +756,7 @@ function DataTab() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [since, setSince]   = useState("");
+  const [backfillFrom, setBackfillFrom] = useState("2026-04-01");
   const [msg, setMsg]       = useState("");
   const [debug, setDebug]     = useState(null);
   const [showDebug, setShowDebug] = useState(false);
@@ -779,19 +780,23 @@ function DataTab() {
   }
 
   function handleBackfill() {
-    if(!window.confirm("Re-run the full backfill from the 1st of last month? This may take several minutes.")) return;
+    const label = backfillFrom || "the 1st of last month";
+    if(!window.confirm("Re-pull all tickets and CSAT from "+label+" to today? This runs in the background and may take several minutes.")) return;
     setSyncing(true); setMsg("");
-    api("/api/sync/backfill",{method:"POST"}).then(r=>{
-      setMsg(r.ok ? "Backfill started." : (r.error||"Failed"));
+    const body = backfillFrom ? {from: backfillFrom} : {};
+    api("/api/sync/backfill",{method:"POST",body:JSON.stringify(body)}).then(r=>{
+      setMsg(r.ok ? (r.message||"Backfill started.") : (r.error||"Failed"));
       setSyncing(false); setTimeout(loadLog,2000);
     }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
   }
 
   function handleTranscripts() {
-    if(!window.confirm("Fetch transcripts for all tickets in the last 4 weeks? This runs slowly in the background and may take a while on first run.")) return;
+    const label = backfillFrom || "the last 4 weeks";
+    if(!window.confirm("Fetch transcripts for tickets from "+label+" to today? This runs slowly in the background (one call per ticket) and is resumable — re-run it if it doesn't finish in one pass.")) return;
     setSyncing(true); setMsg("");
-    api("/api/sync/transcripts",{method:"POST"}).then(r=>{
-      setMsg(r.ok ? "Transcript fetch started — running in the background." : (r.error||"Failed"));
+    const body = backfillFrom ? {from: backfillFrom} : {};
+    api("/api/sync/transcripts",{method:"POST",body:JSON.stringify(body)}).then(r=>{
+      setMsg(r.ok ? (r.message||"Transcript fetch started — running in the background.") : (r.error||"Failed"));
       setSyncing(false); setTimeout(loadLog,2000);
     }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
   }
@@ -841,8 +846,8 @@ function DataTab() {
         <hr className="section-sep"/>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
           <div style={{flex:1,paddingRight:16}}>
-            <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Fetch recent transcripts</div>
-            <div style={{fontSize:12,color:"#667085"}}>Pulls full ticket transcripts for the last 4 weeks so the chat agent can answer detailed questions from customer verbatims. Runs slowly in the background. Auto-tops-up during daily sync.</div>
+            <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Fetch transcripts</div>
+            <div style={{fontSize:12,color:"#667085"}}>Pulls full ticket transcripts from the backfill start date (set below) to today, so the chat agent can answer from customer verbatims. One call per ticket — runs slowly in the background and is resumable (re-run to continue). The daily sync auto-tops-up recent tickets.</div>
           </div>
           <button className="btn-primary" disabled={syncing} onClick={handleTranscripts} style={{whiteSpace:"nowrap"}}>Fetch transcripts</button>
         </div>
@@ -858,9 +863,12 @@ function DataTab() {
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{flex:1,paddingRight:16}}>
             <div style={{fontSize:13,color:"#344054",marginBottom:4,fontWeight:500}}>Full backfill</div>
-            <div style={{fontSize:12,color:"#667085"}}>Re-pulls all tickets from the 1st of the previous month</div>
+            <div style={{fontSize:12,color:"#667085"}}>Re-pulls all tickets + CSAT from the chosen start date to today (transcripts pulled separately). Pages are saved as they load.</div>
           </div>
-          <button className="btn-danger" disabled={syncing} onClick={handleBackfill} style={{whiteSpace:"nowrap"}}>Re-run backfill</button>
+          <div style={{display:"flex",alignItems:"center",gap:8,whiteSpace:"nowrap"}}>
+            <input type="date" className="date-input" value={backfillFrom} onChange={e=>setBackfillFrom(e.target.value)} title="Backfill start date"/>
+            <button className="btn-danger" disabled={syncing} onClick={handleBackfill} style={{whiteSpace:"nowrap"}}>Run backfill</button>
+          </div>
         </div>
       </div>
       <div className="card">

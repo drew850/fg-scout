@@ -671,13 +671,18 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             pass
     return total
 
-def run_backfill(force=False):
-    """One-time backfill from 1st of previous month. force=True bypasses the skip check."""
-    today = date.today()
-    if today.month == 1:
-        start = date(today.year - 1, 12, 1)
-    else:
-        start = date(today.year, today.month - 1, 1)
+def run_backfill(force=False, start=None):
+    """Historical backfill of tickets + CSAT. `start` is a date (default: 1st of the previous month).
+    Tickets sync per page (each page committed before the next), then CSAT for the same window.
+    Intentionally does NOT run the heavy transcript top-up — transcripts are pulled on demand by the
+    chat agent or via a separate bounded pass, so a large historical pull can't stall on that phase.
+    force=True bypasses the 'skip if DB already has tickets' guard."""
+    if start is None:
+        today = date.today()
+        if today.month == 1:
+            start = date(today.year - 1, 12, 1)
+        else:
+            start = date(today.year, today.month - 1, 1)
     since = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=timezone.utc)
 
     conn = get_db()
@@ -790,6 +795,51 @@ def weekly_scheduler_loop():
             slog(f"[Scheduler] loop error: {e}")
             time.sleep(300)
 
+def _daily_run_logged_since(dt_utc):
+    """True if any ticket sync (daily/manual/weekly) has been logged since dt_utc —
+    lets the in-process daily loop coexist with an external Railway cron without double-firing."""
+    conn = get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM scout_sync_log WHERE sync_type IN ('daily','manual','weekly') AND started_at >= %s", (dt_utc,))
+        return (cur.fetchone()[0] or 0) > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def daily_scheduler_loop():
+    """Runs run_daily_sync at 00:00 Asia/Manila every day, in-process (no external cron required)."""
+    # Startup catch-up: if nothing has synced since today's Manila midnight, run once now.
+    try:
+        now = now_manila()
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if not _daily_run_logged_since(today_midnight.astimezone(timezone.utc)):
+            slog("[Scheduler] Startup catch-up: no sync logged since 00:00 Manila, running daily sync now")
+            run_daily_sync()
+    except Exception as e:
+        slog(f"[Scheduler] daily catch-up error: {e}")
+    while True:
+        try:
+            now = now_manila()
+            target = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            secs = (target - now).total_seconds()
+            slog(f"[Scheduler] Next daily sync at {target.isoformat()} (in {int(secs)}s)")
+            time.sleep(max(secs, 60))
+            # Skip if an external cron / manual run already covered today.
+            midnight = now_manila().replace(hour=0, minute=0, second=0, microsecond=0)
+            if _daily_run_logged_since(midnight.astimezone(timezone.utc)):
+                slog("[Scheduler] Daily sync already logged since midnight, skipping in-process run")
+            else:
+                slog("[Scheduler] 00:00 Asia/Manila reached, running daily sync")
+                run_daily_sync()
+            time.sleep(120)  # guard against double-fire within the same minute
+        except Exception as e:
+            slog(f"[Scheduler] daily loop error: {e}")
+            time.sleep(300)
+
 def run_daily_sync():
     """Daily sync — tickets updated in last 25 hours (buffer for timezone drift)."""
     since = datetime.now(timezone.utc) - timedelta(hours=25)
@@ -822,15 +872,17 @@ def get_transcript_window_start():
     this_monday = today - timedelta(days=today.weekday())
     return this_monday - timedelta(weeks=3)  # this week + 3 prior = 4 weeks
 
-def run_transcript_backfill(max_fetches=2000):
+def run_transcript_backfill(max_fetches=2000, start=None):
     """
-    Fetch transcripts for all tickets in the last 4 weeks (Monday-aligned).
-    - Closed tickets: fetch once (transcript_fetched=true and not empty → skip).
+    Fetch transcripts for tickets from `start` (a date) to today; defaults to the last 4 weeks
+    (Monday-aligned) when start is None.
+    - Closed tickets: fetch once (transcript_fetched=true and not empty → skip on later runs).
     - Open tickets: re-fetch each run (still accumulating messages).
-    Throttled and capped per run so it stays bounded and avoids rate limits.
+    Commits every 100 tickets and caps at max_fetches per run, so a large historical pull is
+    bounded and RESUMABLE — re-run it and it continues with whatever still lacks a transcript.
     Designed to run slowly in the background.
     """
-    window_start = get_transcript_window_start()
+    window_start = start if start is not None else get_transcript_window_start()
     ws = window_start.isoformat()
     conn = get_db()
     if not conn:
@@ -2461,8 +2513,21 @@ class Handler(BaseHTTPRequestHandler):
             if not user or user["role"] != "admin":
                 self._json({"error": "Admin only"}, 403)
                 return
-            threading.Thread(target=lambda: run_backfill(force=True), daemon=True).start()
-            self._json({"ok": True, "message": "Backfill started"})
+            raw = self._read_body()
+            try:
+                body = json.loads(raw)
+            except:
+                body = {}
+            start = None
+            fs = (body.get("from") or "").strip()
+            if fs:
+                try:
+                    start = date.fromisoformat(fs)
+                except:
+                    self._json({"error": "Invalid from date — use YYYY-MM-DD"}, 400)
+                    return
+            threading.Thread(target=lambda: run_backfill(force=True, start=start), daemon=True).start()
+            self._json({"ok": True, "message": "Backfill started" + (f" from {fs}" if fs else "")})
             return
 
         # ── API: Fetch recent transcripts (manual, admin) ──────────────────
@@ -2476,9 +2541,22 @@ class Handler(BaseHTTPRequestHandler):
             if not user or user["role"] != "admin":
                 self._json({"error": "Admin only"}, 403)
                 return
-            # Larger cap for the manual initial pass
-            threading.Thread(target=lambda: run_transcript_backfill(max_fetches=100000), daemon=True).start()
-            self._json({"ok": True, "message": "Transcript fetch started (runs in background)"})
+            raw = self._read_body()
+            try:
+                body = json.loads(raw)
+            except:
+                body = {}
+            start = None
+            fs = (body.get("from") or "").strip()
+            if fs:
+                try:
+                    start = date.fromisoformat(fs)
+                except:
+                    self._json({"error": "Invalid from date — use YYYY-MM-DD"}, 400)
+                    return
+            # Larger cap for the manual initial pass; resumable, so re-run to continue if capped.
+            threading.Thread(target=lambda: run_transcript_backfill(max_fetches=100000, start=start), daemon=True).start()
+            self._json({"ok": True, "message": "Transcript fetch started (runs in background)" + (f" from {fs}" if fs else "")})
             return
 
         # ── Cron: transcript top-up ────────────────────────────────────────
@@ -2852,5 +2930,6 @@ if __name__ == "__main__":
     print("=" * 50)
     init_db()
     threading.Thread(target=run_backfill, daemon=True).start()
+    threading.Thread(target=daily_scheduler_loop, daemon=True).start()
     threading.Thread(target=weekly_scheduler_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
