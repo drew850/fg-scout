@@ -1616,6 +1616,8 @@ HOW TO WORK:
 4. If a query returns nothing, check the date year, then try broader terms before concluding there's no data.
 5. Always deliver an analyst's answer: lead with the insight, support with numbers, add brief interpretation or a recommendation when useful. Don't just dump rows.
 
+EXPORTING: When your answer is backed by a data query, the user can download the exact rows as a CSV via the "Download rows (CSV)" button shown beneath your message. So never say you're unable to export or generate a file — if the user asks for a CSV or spreadsheet, tell them to use that button (it exports the rows from the query behind your latest answer). If they need a broader pull than one query returns, suggest they widen the question or use the Data tab's full export.
+
 Never expose raw customer emails or full names. Exclude Jamie (the AI bot) from human-agent analysis unless explicitly asked about the bot."""
 
     # The Anthropic Messages API only permits {role, content} per message. The
@@ -1651,8 +1653,10 @@ Never expose raw customer emails or full names. Exclude Jamie (the AI bot) from 
     content = result.get("content", [])
     return " ".join(c.get("text","") for c in content if c.get("type") == "text")
 
-def execute_chat_sql(sql):
-    """Run a SELECT-only query, return rows as list of dicts."""
+def execute_chat_sql(sql, max_rows=100):
+    """Run a SELECT-only query, return rows as list of dicts.
+    max_rows sets the auto-appended LIMIT when the query has none (chat uses 100;
+    CSV export passes a higher cap). An explicit LIMIT in the query is respected."""
     sql_clean = sql.strip()
     # Must start with SELECT or WITH (CTEs are read-only and valid)
     upper = sql_clean.upper()
@@ -1677,7 +1681,7 @@ def execute_chat_sql(sql):
             return None, f"Forbidden keyword: {word}"
 
     if "LIMIT" not in upper:
-        sql_clean = body + " LIMIT 100"
+        sql_clean = body + f" LIMIT {int(max_rows)}"
     else:
         sql_clean = body
     conn = get_db()
@@ -2498,6 +2502,63 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=do_refresh, daemon=True).start()
             self._json({"ok": True, "message": f"Refreshing insights for {dept}"})
+            return
+
+        # ── API: Chat results → CSV ───────────────────────────────────────
+        # Re-runs the query behind a chat answer and streams the rows as CSV.
+        # The SQL is already shown to the user in the answer's SQL chip; it goes
+        # through the same SELECT-only guard as the chat agent, with a higher row cap.
+        if path == "/api/chat/export":
+            token = self._get_token()
+            if not verify_session(token):
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            raw = self._read_body()
+            try:
+                body = json.loads(raw)
+            except:
+                self._json({"error": "Invalid JSON"}, 400)
+                return
+            sql = (body.get("sql") or "").strip()
+            if not sql:
+                self._json({"error": "No query is attached to this answer, so there are no rows to export."}, 400)
+                return
+            rows, err = execute_chat_sql(sql, max_rows=5000)
+            if err:
+                self._json({"error": err}, 400)
+                return
+            try:
+                import io, csv as _csv
+                buf = io.StringIO()
+                w = _csv.writer(buf)
+                if rows:
+                    cols = list(rows[0].keys())
+                    w.writerow(cols)
+                    for r in rows:
+                        out = []
+                        for c in cols:
+                            v = r.get(c)
+                            if hasattr(v, "astimezone"):          # tz-aware datetime → Manila, Gorgias-style
+                                v = v.astimezone(MANILA).strftime("%Y-%m-%d %H:%M")
+                            elif isinstance(v, (dict, list)):      # JSONB → compact JSON text
+                                v = json.dumps(v, default=str)
+                            out.append("" if v is None else v)
+                        w.writerow(out)
+                else:
+                    w.writerow(["(no rows)"])
+                data = ("\ufeff" + buf.getvalue()).encode("utf-8")  # UTF-8 BOM for Excel
+                fname = _re.sub(r'[^A-Za-z0-9._-]', '_', (body.get("filename") or "scout_results").strip()) or "scout_results"
+                if not fname.endswith(".csv"):
+                    fname += ".csv"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
             return
 
         # ── API: Chat ─────────────────────────────────────────────────────

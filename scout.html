@@ -182,6 +182,13 @@ input,select,textarea{font-family:inherit;font-size:13px}
 .chat-send:disabled{opacity:.5;cursor:not-allowed}
 .chat-clear{background:transparent;border:none;color:#98a2b3;font-size:11px;transition:color .15s}
 .chat-clear:hover{color:#475467}
+.chat-expand{background:transparent;border:none;color:#98a2b3;font-size:11px;transition:color .15s;white-space:nowrap}
+.chat-expand:hover{color:#475467}
+.chat-panel.expanded{width:90vw;height:90vh;max-height:90vh;bottom:5vh;right:5vw;left:auto}
+.chat-panel.expanded .chat-msg{max-width:70%}
+.chat-dl{margin-top:6px;background:#eef4ff;border:1px solid #cddffb;color:#2970ff;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:500;cursor:pointer;transition:background .15s}
+.chat-dl:hover{background:#dfeafe}
+.chat-dl:disabled{opacity:.6;cursor:default}
 
 /* ── Misc ── */
 .empty{color:#98a2b3;font-size:13px;padding:40px;text-align:center}
@@ -215,6 +222,45 @@ function downloadCSV(path, filename) {
       URL.revokeObjectURL(url);
     })
     .catch(e => alert(e.message));
+}
+
+// Download the rows behind a chat answer as CSV (POST the query; server re-runs it SELECT-only).
+function downloadChatCSV(sql, filename) {
+  const token = sessionStorage.getItem("scout_session") || "";
+  const name = (filename && filename.endsWith(".csv")) ? filename : (filename||"scout_results")+".csv";
+  return fetch(BASE+"/api/chat/export", {
+    method:"POST",
+    headers:{"Content-Type":"application/json", ...(token ? {"Authorization":"Bearer "+token} : {})},
+    body: JSON.stringify({sql, filename: name})
+  })
+    .then(r => { if(!r.ok) return r.json().then(j=>{throw new Error(j.error||("Export failed ("+r.status+")"));}); return r.blob(); })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(e => alert(e.message));
+}
+
+// Export the whole chat as a readable Markdown transcript (client-side, no server call).
+function exportConversation(messages) {
+  const blocks = messages.map(m => {
+    const who = m.role === "user" ? "You" : "Scout";
+    let b = "### " + who + "\n\n" + (m.content || "");
+    if(m.sql) b += "\n\n_SQL:_ `" + m.sql + "`";
+    if(m.row_count) b += "\n\n_(" + m.row_count + " rows)_";
+    return b;
+  });
+  const md = "# Ask Scout — Conversation\n\n_Exported " + new Date().toLocaleString() + "_\n\n"
+           + blocks.join("\n\n---\n\n") + "\n";
+  const blob = new Blob([md], {type:"text/markdown"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "scout_conversation.md";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function hashRoute() { return window.location.hash.replace(/^#/,"") || "/dashboard"; }
@@ -971,6 +1017,7 @@ function Settings({currentUser}) {
 // ── Chat widget ───────────────────────────────────────────────────────────────
 function ChatWidget() {
   const [open, setOpen]       = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput]     = useState("");
   const [thinking, setThinking] = useState(false);
@@ -1004,13 +1051,17 @@ function ChatWidget() {
         </svg>
       </button>
       {open && (
-        <div className="chat-panel">
+        <div className={"chat-panel"+(expanded?" expanded":"")}>
           <div className="chat-header">
             <div>
               <div className="chat-header-title">Ask Scout</div>
               <div className="chat-header-sub">Query your ticket data in plain English</div>
             </div>
-            <button className="chat-close" onClick={()=>setOpen(false)}>×</button>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <button className="chat-expand" onClick={()=>setExpanded(e=>!e)}
+                title={expanded?"Restore size":"Enlarge window"}>{expanded?"⤡ Shrink":"⤢ Enlarge"}</button>
+              <button className="chat-close" onClick={()=>setOpen(false)}>×</button>
+            </div>
           </div>
           <div className="chat-messages">
             {messages.length===0 && (
@@ -1022,6 +1073,10 @@ function ChatWidget() {
                 {m.sql && <div className="chat-sql">SQL: {m.sql}</div>}
                 {m.transcripts_fetched>0 && <div style={{fontSize:10,color:"#98a2b3",marginTop:4}}>Read {m.transcripts_fetched} transcript{m.transcripts_fetched>1?"s":""}</div>}
                 {m.row_count>0 && <div style={{fontSize:10,color:"#98a2b3",marginTop:2}}>{m.row_count} rows</div>}
+                {m.role==="assistant" && m.sql && m.row_count>0 && (
+                  <div><button className="chat-dl"
+                    onClick={()=>downloadChatCSV(m.sql, "scout_results")}>⬇ Download rows (CSV)</button></div>
+                )}
               </div>
             ))}
             {thinking && <div className="chat-msg thinking">Thinking… (reading transcripts if needed)</div>}
@@ -1033,7 +1088,8 @@ function ChatWidget() {
             <button className="chat-send" disabled={thinking||!input.trim()} onClick={handleSend}>Send</button>
           </div>
           {messages.length>0 && (
-            <div style={{padding:"0 14px 10px",textAlign:"right"}}>
+            <div style={{padding:"0 14px 10px",display:"flex",gap:14,justifyContent:"flex-end"}}>
+              <button className="chat-clear" onClick={()=>exportConversation(messages)}>Export conversation</button>
               <button className="chat-clear" onClick={()=>setMessages([])}>Clear conversation</button>
             </div>
           )}
