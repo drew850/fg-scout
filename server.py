@@ -529,6 +529,12 @@ def slog(msg):
         pass
     print(msg)
 
+# ── Cooperative sync cancellation ──────────────────────────────────────────────
+# Set by /api/sync/cancel; checked by every sync loop between pages/tickets and by
+# the orchestrators between phases, so a running background sync stops at the next
+# safe boundary. Each new user/scheduler-initiated run clears it before starting.
+_sync_stop = threading.Event()
+
 
 def run_sync(since_dt, sync_type="manual", log_id=None):
     """Fetch all tickets updated since since_dt, upsert into DB."""
@@ -576,7 +582,12 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
     try:
         cur = conn.cursor()
         stop = False
+        cancelled = False
         while not stop:
+            if _sync_stop.is_set():
+                slog("[Sync] cancel requested — stopping at page boundary")
+                cancelled = True
+                break
             page_num += 1
             params = {"limit": 100, "order_by": "updated_datetime:desc"}
             if cursor:
@@ -652,8 +663,12 @@ def run_sync(since_dt, sync_type="manual", log_id=None):
             time.sleep(0.15)  # gentle rate limiting
 
         conn.commit()
-        update_log_progress("success")
-        slog(f"[Sync] DONE type={sync_type} total={total} pages={page_num}")
+        if cancelled:
+            update_log_progress("cancelled", error="Cancelled by user")
+            slog(f"[Sync] CANCELLED type={sync_type} total={total} pages={page_num}")
+        else:
+            update_log_progress("success")
+            slog(f"[Sync] DONE type={sync_type} total={total} pages={page_num}")
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -684,6 +699,7 @@ def run_backfill(force=False, start=None):
         else:
             start = date(today.year, today.month - 1, 1)
     since = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=timezone.utc)
+    _sync_stop.clear()
 
     conn = get_db()
     if not conn:
@@ -717,19 +733,29 @@ def run_backfill(force=False, start=None):
         log_id = None
 
     run_sync(since, sync_type="backfill", log_id=log_id)
+    if _sync_stop.is_set():
+        slog("[Backfill] cancelled — skipping CSAT phase")
+        return
     # Sync CSAT for the same window as the ticket backfill.
     slog("[CSAT] Starting post-backfill CSAT sync...")
     run_csat_sync(since_dt=since)
 
 def run_full_sync(since_dt, sync_type="manual", log_id=None):
     """Full sync: tickets updated since since_dt, then transcript top-up, then CSAT."""
+    _sync_stop.clear()
     slog(f"[Sync] Full sync ({sync_type}) since {since_dt.isoformat()}")
     run_sync(since_dt, sync_type=sync_type, log_id=log_id)
+    if _sync_stop.is_set():
+        slog("[Sync] cancelled — skipping transcript and CSAT phases")
+        return
     slog("[Transcripts] post-sync transcript top-up...")
     try:
         run_transcript_backfill(max_fetches=100000)   # cover the whole prior week, not just 2000
     except Exception as e:
         slog(f"[Transcripts] error: {e}")
+    if _sync_stop.is_set():
+        slog("[Sync] cancelled — skipping CSAT phase")
+        return
     slog("[CSAT] post-sync CSAT top-up...")
     try:
         run_csat_sync(since_dt=since_dt)
@@ -842,6 +868,7 @@ def daily_scheduler_loop():
 
 def run_daily_sync():
     """Daily sync — tickets updated in last 25 hours (buffer for timezone drift)."""
+    _sync_stop.clear()
     since = datetime.now(timezone.utc) - timedelta(hours=25)
     conn = get_db()
     if not conn:
@@ -859,9 +886,15 @@ def run_daily_sync():
         log_id = None
     slog("[Sync] Running daily sync...")
     run_sync(since, sync_type="daily", log_id=log_id)
+    if _sync_stop.is_set():
+        slog("[Sync] daily cancelled — skipping transcript and CSAT phases")
+        return
     # After syncing tickets, top up transcripts for the recent window (background).
     slog("[Transcripts] Starting post-sync transcript top-up...")
     run_transcript_backfill(max_fetches=2000)
+    if _sync_stop.is_set():
+        slog("[Sync] daily cancelled — skipping CSAT phase")
+        return
     # Sync recent CSAT responses (last ~30 days is plenty for daily top-up).
     slog("[CSAT] Starting post-sync CSAT top-up...")
     run_csat_sync(since_dt=datetime.now(timezone.utc) - timedelta(days=30))
@@ -921,7 +954,12 @@ def run_transcript_backfill(max_fetches=2000, start=None):
         slog(f"[Transcripts] window from {ws}: {len(candidates)} candidates (cap {max_fetches})")
 
         ucur = conn.cursor()
+        cancelled = False
         for row in candidates:
+            if _sync_stop.is_set():
+                slog("[Transcripts] cancel requested — stopping")
+                cancelled = True
+                break
             if fetched >= max_fetches:
                 slog(f"[Transcripts] hit per-run cap ({max_fetches}), will continue next run")
                 break
@@ -945,11 +983,12 @@ def run_transcript_backfill(max_fetches=2000, start=None):
             if lc:
                 lcur = lc.cursor()
                 lcur.execute("""
-                    UPDATE scout_sync_log SET finished_at = now(), tickets_synced = %s, status = 'success'
+                    UPDATE scout_sync_log SET finished_at = now(), tickets_synced = %s, status = %s, error = %s
                     WHERE id = %s
-                """, (fetched, log_id))
+                """, (fetched, "cancelled" if cancelled else "success",
+                      "Cancelled by user" if cancelled else None, log_id))
                 lc.commit(); lc.close()
-        slog(f"[Transcripts] DONE — {fetched} transcripts fetched")
+        slog(f"[Transcripts] {'CANCELLED' if cancelled else 'DONE'} — {fetched} transcripts fetched")
     except Exception as e:
         import traceback
         slog(f"[Transcripts] ERROR after {fetched}: {e}")
@@ -1035,7 +1074,12 @@ def run_csat_sync(since_dt=None, log_id=None):
     try:
         cur = conn.cursor()
         stop = False
+        cancelled = False
         while not stop:
+            if _sync_stop.is_set():
+                slog("[CSAT] cancel requested — stopping at page boundary")
+                cancelled = True
+                break
             page += 1
             params = {"limit": 100, "order_by": "created_datetime:desc"}
             if cursor:
@@ -1097,8 +1141,12 @@ def run_csat_sync(since_dt=None, log_id=None):
                 break
             time.sleep(0.15)
         conn.commit()
-        slog(f"[CSAT] DONE — {total} surveys synced")
-        update_csat_log("success")
+        if cancelled:
+            slog(f"[CSAT] CANCELLED — {total} surveys synced")
+            update_csat_log("cancelled", error="Cancelled by user")
+        else:
+            slog(f"[CSAT] DONE — {total} surveys synced")
+            update_csat_log("success")
     except Exception as e:
         slog(f"[CSAT] ERROR after {total}: {e}")
         update_csat_log("error", error=e)
@@ -2555,21 +2603,62 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "Invalid from date — use YYYY-MM-DD"}, 400)
                     return
             # Larger cap for the manual initial pass; resumable, so re-run to continue if capped.
+            _sync_stop.clear()
             threading.Thread(target=lambda: run_transcript_backfill(max_fetches=100000, start=start), daemon=True).start()
             self._json({"ok": True, "message": "Transcript fetch started (runs in background)" + (f" from {fs}" if fs else "")})
             return
 
         # ── Cron: transcript top-up ────────────────────────────────────────
         if path == "/api/cron/transcripts":
+            _sync_stop.clear()
             threading.Thread(target=lambda: run_transcript_backfill(max_fetches=5000), daemon=True).start()
             self._json({"ok": True, "message": "Transcript top-up started"})
             return
 
         # ── Cron / manual: CSAT sync ───────────────────────────────────────
         if path == "/api/cron/csat":
+            _sync_stop.clear()
             since_dt = datetime.now(timezone.utc) - timedelta(days=30)
             threading.Thread(target=lambda: run_csat_sync(since_dt=since_dt), daemon=True).start()
             self._json({"ok": True, "message": "CSAT sync started — last 30 days"})
+            return
+
+        # ── API: Cancel running syncs (admin) ─────────────────────────────
+        # Signals every running sync loop to stop at its next page/ticket boundary and
+        # clears any stale 'running' log rows (e.g. left by a process restart) so the UI unsticks.
+        if path == "/api/sync/cancel":
+            token = self._get_token()
+            session = verify_session(token)
+            if not session:
+                self._json({"error": "Unauthorized"}, 401)
+                return
+            user = get_user(session["email"])
+            if not user or user["role"] != "admin":
+                self._json({"error": "Admin only"}, 403)
+                return
+            _sync_stop.set()
+            cleared = 0
+            conn = get_db()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        UPDATE scout_sync_log
+                        SET status = 'cancelled', finished_at = now(),
+                            error = COALESCE(error, 'Cancelled by user')
+                        WHERE status = 'running'
+                    """)
+                    cleared = cur.rowcount or 0
+                    conn.commit()
+                except Exception as e:
+                    try: conn.rollback()
+                    except: pass
+                    slog(f"[Cancel] could not clear running rows: {e}")
+                finally:
+                    conn.close()
+            slog(f"[Cancel] stop requested; cleared {cleared} running log row(s)")
+            self._json({"ok": True, "cleared": cleared,
+                        "message": f"Stop requested. {cleared} running sync(s) marked cancelled; any live sync stops at its next page."})
             return
 
         # ── API: Refresh insights ─────────────────────────────────────────

@@ -123,6 +123,7 @@ input,select,textarea{font-family:inherit;font-size:13px}
 .pill-success{background:#ecfdf3;color:#067647}
 .pill-error{background:#fef3f2;color:#b42318}
 .pill-running{background:#fffaeb;color:#b54708}
+.pill-cancelled{background:#f2f4f7;color:#667085}
 .btn-primary{background:#2970ff;border:1px solid #2970ff;border-radius:8px;color:#fff;padding:9px 17px;font-size:13px;transition:background .15s;font-weight:500}
 .btn-primary:hover{background:#1c5fe0}
 .btn-primary:disabled{opacity:.5;cursor:not-allowed}
@@ -801,6 +802,15 @@ function DataTab() {
     }).catch(()=>{ setMsg("Network error"); setSyncing(false); });
   }
 
+  function handleCancel() {
+    if(!window.confirm("Stop all running syncs? Any in-progress sync will halt at its next page (work already saved is kept), and stuck 'running' entries will be cleared.")) return;
+    setMsg("");
+    api("/api/sync/cancel",{method:"POST"}).then(r=>{
+      setMsg(r.ok ? (r.message||"Stop requested.") : (r.error||"Failed"));
+      setTimeout(loadLog,1500);
+    }).catch(()=>{ setMsg("Network error"); });
+  }
+
   function handleCsatSync() {
     setSyncing(true); setMsg("");
     api("/api/cron/csat",{method:"POST"}).then(r=>{
@@ -830,6 +840,7 @@ function DataTab() {
         <div className="sync-status">
           <div className={"dot "+( running?"dot-amber": lastSync?.status==="success"?"dot-green": lastSync?.status==="error"?"dot-red":"dot-gray")}/>
           <span>{running ? "Sync in progress…" : lastSync ? "Last sync: "+fmtDT(lastSync.started_at)+" · "+lastSync.tickets_synced+" tickets" : "No sync history"}</span>
+          {running && <button className="btn-danger" onClick={handleCancel} style={{marginLeft:"auto",whiteSpace:"nowrap",padding:"5px 12px",fontSize:12}}>Stop sync</button>}
         </div>
         <div style={{color:"#667085",fontSize:12}}>Total tickets in database: <span style={{color:"#344054",fontWeight:500}}>{fmt(log?.total_tickets)}</span></div>
       </div>
