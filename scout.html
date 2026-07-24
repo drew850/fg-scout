@@ -189,6 +189,8 @@ input,select,textarea{font-family:inherit;font-size:13px}
 .chat-dl{margin-top:6px;background:#eef4ff;border:1px solid #cddffb;color:#2970ff;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:500;cursor:pointer;transition:background .15s}
 .chat-dl:hover{background:#dfeafe}
 .chat-dl:disabled{opacity:.6;cursor:default}
+.date-input{background:#fff;border:1px solid #d0d5dd;border-radius:6px;color:#1a1d21;font-size:12px;padding:5px 8px;outline:none;font-family:inherit}
+.date-input:focus{border-color:#2970ff}
 
 /* ── Misc ── */
 .empty{color:#98a2b3;font-size:13px;padding:40px;text-align:center}
@@ -346,6 +348,8 @@ function Dashboard({weeks, selectedWeek, onWeekChange}) {
   const [error, setError] = useState("");
   const [selectedAgents, setSelectedAgents] = useState(null); // null = all
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate]     = useState("");
   useEffect(()=>{
     setLoading(true); setError("");
     api("/api/dashboard"+(selectedWeek?"?week="+selectedWeek:"")).then(r=>{
@@ -380,10 +384,28 @@ function Dashboard({weeks, selectedWeek, onWeekChange}) {
       {error && <div className="error-box">{error}</div>}
       {loading && <div className="empty">Loading…</div>}
       {!loading && data && <>
-        <div style={{display:"flex",gap:8,marginBottom:14}}>
-          <button className="btn-sm" onClick={()=>downloadCSV("/api/export/tickets"+(selectedWeek?"?week="+selectedWeek:""), "scout_tickets_"+(selectedWeek||"latest")+".csv")}>Export tickets CSV</button>
-          <button className="btn-sm" onClick={()=>downloadCSV("/api/export/csat"+(selectedWeek?"?week="+selectedWeek:""), "scout_csat_"+(selectedWeek||"latest")+".csv")}>Export CSAT CSV</button>
+        <div style={{display:"flex",gap:8,marginBottom:(fromDate||toDate)?4:14,alignItems:"center",flexWrap:"wrap"}}>
+          <button className="btn-sm" onClick={()=>{
+            const range=(fromDate||toDate);
+            const q=range?("?"+[fromDate&&"from="+fromDate,toDate&&"to="+toDate].filter(Boolean).join("&")):(selectedWeek?"?week="+selectedWeek:"");
+            const n=range?((fromDate||"start")+"_to_"+(toDate||"end")):(selectedWeek||"latest");
+            downloadCSV("/api/export/tickets"+q, "scout_tickets_"+n+".csv");
+          }}>Export tickets CSV</button>
+          <button className="btn-sm" onClick={()=>{
+            const range=(fromDate||toDate);
+            const q=range?("?"+[fromDate&&"from="+fromDate,toDate&&"to="+toDate].filter(Boolean).join("&")):(selectedWeek?"?week="+selectedWeek:"");
+            const n=range?((fromDate||"start")+"_to_"+(toDate||"end")):(selectedWeek||"latest");
+            downloadCSV("/api/export/csat"+q, "scout_csat_"+n+".csv");
+          }}>Export CSAT CSV</button>
+          <span style={{fontSize:11,color:"#98a2b3",marginLeft:6}}>Range:</span>
+          <input type="date" className="date-input" value={fromDate} max={toDate||undefined}
+            onChange={e=>setFromDate(e.target.value)} title="From date (inclusive)"/>
+          <span style={{fontSize:11,color:"#98a2b3"}}>→</span>
+          <input type="date" className="date-input" value={toDate} min={fromDate||undefined}
+            onChange={e=>setToDate(e.target.value)} title="To date (inclusive)"/>
+          {(fromDate||toDate) && <button className="chat-clear" onClick={()=>{setFromDate("");setToDate("");}}>clear range</button>}
         </div>
+        {(fromDate||toDate) && <div style={{fontSize:11,color:"#98a2b3",marginBottom:14}}>Exports use the date range above (both dates inclusive) and ignore the week selector. Clear the range to export by week again.</div>}
         <div className="stats-grid">
           <div className="stat-card">
             <div className="stat-val">{fmt(data.stats?.total_tickets)}</div>

@@ -1994,7 +1994,28 @@ class Handler(BaseHTTPRequestHandler):
                             "message_count", "transcript"]
                 cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 col_sql = ", ".join(cols)
-                if qs.get("all", [""])[0]:
+                frm = qs.get("from", [""])[0].strip()
+                to  = qs.get("to", [""])[0].strip()
+                if frm or to:
+                    # Explicit date range (both bounds inclusive, Manila day boundaries).
+                    # Takes precedence over ?all / ?week; leaves those paths untouched.
+                    conds, params = [], []
+                    try:
+                        if frm:
+                            s = date.fromisoformat(frm)
+                            conds.append("created_date >= %s")
+                            params.append(datetime(s.year, s.month, s.day, tzinfo=MANILA).isoformat())
+                        if to:
+                            e = date.fromisoformat(to)
+                            end = datetime(e.year, e.month, e.day, tzinfo=MANILA) + timedelta(days=1)
+                            conds.append("created_date < %s")
+                            params.append(end.isoformat())
+                    except Exception:
+                        self._json({"error": "Invalid from/to date — use YYYY-MM-DD"}, 400)
+                        return
+                    cur.execute(f"SELECT {col_sql} FROM {table} WHERE {' AND '.join(conds)} ORDER BY created_date", params)
+                    fname = f"{table}_{frm or 'start'}_to_{to or 'end'}.csv"
+                elif qs.get("all", [""])[0]:
                     cur.execute(f"SELECT {col_sql} FROM {table} ORDER BY created_date DESC")
                     fname = f"{table}_all.csv"
                 else:
